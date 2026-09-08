@@ -1,0 +1,76 @@
+run:
+  output_dir: runs/1UBQ
+  seed: 20260907
+  enable_x64: false
+input:
+  reflections: /Users/hamletkhachatryan/PycharmProjects/FieldX/data/1ubq/1ubq-sf.cif
+  model: /Users/hamletkhachatryan/PycharmProjects/FieldX/data/1ubq/1ubq.cif
+  scattering: xray
+  observation_kind: amplitude
+  columns:
+    observation: FP
+    sigma: SIGFP
+    free: FreeR_flag
+  free_test_value: null
+  expected_free_fraction_min: 0.02
+  expected_free_fraction_max: 0.15
+split:
+  strategy: hash
+  tune_fraction_of_work: 0.1
+  final_fraction_if_hash: 0.1
+  pair_friedel_when_nonanomalous: true
+  anomalous: false
+resolution:
+  d_min_angstrom: 1.8035861253738403
+  d_max_angstrom: 32.7287712097168
+grid:
+  shape: null
+  samples_per_dmin: 3.0
+prior:
+  kernel: matern
+  tau_density: 0.03
+  correlation_length_angstrom: 0.75
+  alpha: 2.5
+  components: []
+  remove_mean: true
+  latent_distribution: gaussian
+  student_t_df: 4.0
+  laplace_softening: 0.001
+  cauchy_scale: 1.0
+baseline:
+  refmac_compatible_density_blur: false
+  density_cutoff: 1.0e-06
+  bulk_solvent:
+    enabled: true
+    radii: refmac
+    k_sol: 0.35
+    b_sol_angstrom2: 46.0
+  scaling:
+    enabled: true
+    fit_isotropic_b_first: true
+likelihood:
+  global_scale: profile
+  fixed_scale: 1.0
+  sigma_floor: 1.0e-06
+  loss: gaussian
+  student_t_df: 6.0
+optimizer:
+  method: lbfgs
+  fit_scope: train
+  max_iterations: 250
+  tolerance: 5.0e-05
+  lbfgs_memory: 8
+  adam_learning_rate: 0.003
+  checkpoint_every: 10
+  validation_patience: 8
+  validation_min_delta: 1.0e-05
+information:
+  n_modes: 16
+  max_iterations: 80
+  tolerance: 0.0001
+atomic_benchmark:
+  enabled: true
+  n_atoms: 8
+  coordinate_delta_angstrom: 0.02
+  b_delta_angstrom2: 0.5
+  occupancy_delta: 0.02
