@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: bash -n every script
+        run: |
+          set -euo pipefail
+          for script in scripts/*.sh slurm/*.sh slurm/dls/*.sh slurm/*.sbatch; do
+            echo "checking $script"
+            bash -n "$script"
+          done
+
+  python:
+    name: ruff + pytest (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # CPU JAX only. CUDA is never required by CI; GPU tests are marked `gpu` and
+      # run on the cluster through slurm/40_gpu_tests.sbatch.
+      - name: Create the environment
+        run: uv sync --locked --extra cpu --group dev --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: |
+          uv run --frozen --no-sync ruff format --check src tests
+          uv run --frozen --no-sync ruff check src tests
+
+      - name: Test
+        run: uv run --frozen --no-sync pytest -m "not gpu and not cluster" --cov=crystal_field --cov-report=term-missing
+
+      - name: Confirm the GPU suite is excluded from CI
+        run: uv run --frozen --no-sync pytest -m gpu --collect-only -q

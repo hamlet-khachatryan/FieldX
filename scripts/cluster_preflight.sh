@@ -29,7 +29,31 @@ echo "Environment"
 run_uv python -c 'import sys; print(sys.version.split()[0])' >/dev/null 2>&1 \
   && ok "python runs ($(run_uv python -c 'import sys; print(sys.version.split()[0])'))" \
   || bad "python does not run in the repository environment"
-[[ -n "${UV_CACHE_DIR:-}" ]] && note "uv cache: $UV_CACHE_DIR" || note "uv cache: default (set FIELDX_UV_CACHE to keep it off a home quota)"
+echo
+
+# The CUDA wheels total several GB. A cache on a small home quota fails partway through
+# extraction with "Disk quota exceeded", after the download has already been paid for.
+# On a laptop $HOME is the right place, so this only fails on a submission host.
+echo "Storage"
+if command -v sbatch >/dev/null 2>&1; then on_cluster=1; else on_cluster=0; fi
+check_location() {
+  local label="$1" path="$2" fix="$3"
+  if [[ -z "$path" ]]; then
+    note "$label: unknown"
+  elif [[ -n "${HOME:-}" && ("$path" == "$HOME" || "$path" == "$HOME"/*) ]]; then
+    if (( on_cluster )); then
+      bad "$label is under \$HOME ($path); multi-GB accelerator wheels will exhaust a home quota"
+      [[ -z "$fix" ]] || printf '        fix: export %s=/path/on/shared/filesystem\n' "$fix"
+    else
+      note "$label: $path (fine off-cluster)"
+    fi
+  else
+    ok "$label: $path"
+  fi
+}
+check_location "uv cache"      "$("$UV" cache dir 2>/dev/null || true)"  UV_CACHE_DIR
+check_location "uv python dir" "$("$UV" python dir 2>/dev/null || true)" UV_PYTHON_INSTALL_DIR
+check_location "project root"  "$PROJECT_ROOT"                          ""
 echo
 
 echo "Scientific stack"
@@ -60,10 +84,16 @@ if command -v sbatch >/dev/null 2>&1; then
 else
   bad "sbatch not found; production jobs cannot be submitted from this host"
 fi
-if [[ -f "$PROJECT_ROOT/slurm/dls/cuda.sh" ]]; then
-  ok "CUDA init script present (slurm/dls/cuda.sh, sourced inside GPU jobs only)"
+# Honour the same override that fieldx_load_cuda uses, so a non-DLS site pointing
+# FIELDX_CUDA_INIT at its own script is not reported as broken.
+cuda_init="${FIELDX_CUDA_INIT:-$PROJECT_ROOT/slurm/dls/cuda.sh}"
+if [[ -f "$cuda_init" ]]; then
+  ok "CUDA init script: $cuda_init (sourced inside GPU jobs only)"
 else
-  bad "slurm/dls/cuda.sh is missing"
+  bad "CUDA init script not found: $cuda_init"
+  printf '        GPU jobs would run without CUDA loaded and fall back to a CPU backend.\n'
+  printf '        fix: restore the file from the repository (git status; git pull), or\n'
+  printf '             export FIELDX_CUDA_INIT=/path/to/your/site/cuda-init.sh\n'
 fi
 echo
 

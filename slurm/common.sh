@@ -48,8 +48,12 @@ if [[ -z "$UV" || ! -x "$UV" ]]; then
 fi
 export UV
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$PROJECT_ROOT/.venv}"
-# Keep the uv cache off a small home quota when a location is configured.
+# Keep uv's caches off a small home quota. UV_CACHE_DIR and UV_PYTHON_INSTALL_DIR are
+# uv's own variables and so also apply to bare `uv sync` on a login node; FIELDX_UV_CACHE
+# is an alias for jobs that only export the FieldX variables. The CUDA wheels are several
+# GB, so a home-quota cache fails partway through extraction.
 [[ -z "${FIELDX_UV_CACHE:-}" ]] || export UV_CACHE_DIR="$FIELDX_UV_CACHE"
+[[ -z "${FIELDX_UV_PYTHON_DIR:-}" ]] || export UV_PYTHON_INSTALL_DIR="$FIELDX_UV_PYTHON_DIR"
 
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-true}"

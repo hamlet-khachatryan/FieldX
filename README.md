@@ -148,7 +148,8 @@ with all data and results under `/dls/data2temp01/hamlet/workspace/`:
     FieldX/          this repository, including its .venv
     data/            <PDBID>/ coordinate and structure-factor files
     runs/            <PDBID>/ run outputs, logs and prepared reflections
-    uv-cache/        uv cache, kept off the small home quota
+    uv-cache/        uv cache, kept off the small home quota (UV_CACHE_DIR)
+    uv-python/       uv-managed interpreters (UV_PYTHON_INSTALL_DIR)
     tools/
 ```
 
@@ -157,10 +158,16 @@ On a login node:
 ```bash
 cd /dls/data2temp01/hamlet/workspace/FieldX
 
+# Keep uv off the home quota BEFORE syncing: the CUDA wheels are several GB and a
+# home-quota cache fails partway through extraction with "Disk quota exceeded".
+# These are uv's own variables, so they also apply to bare `uv` commands.
+export UV_CACHE_DIR=/dls/data2temp01/hamlet/workspace/uv-cache
+export UV_PYTHON_INSTALL_DIR=/dls/data2temp01/hamlet/workspace/uv-python
+
 export FIELDX_DATA_ROOT=/dls/data2temp01/hamlet/workspace/data
 export FIELDX_RUNS_ROOT=/dls/data2temp01/hamlet/workspace/runs
-export FIELDX_UV_CACHE=/dls/data2temp01/hamlet/workspace/uv-cache
 
+uv cache dir     # confirm it is NOT under $HOME
 uv sync --locked --extra cuda13 --group dev
 
 uv run pytest

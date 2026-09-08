@@ -1,0 +1,36 @@
+# v3 pilot grid for 1UBQ: three Matern correlation lengths plus a squared-exponential
+# control, all with Gaussian latent statistics.
+#
+# Heavy-tailed latents (Student-t, Laplace, Cauchy), band-limited white and multiscale
+# mixtures are deliberately absent. The first experiment tests the existing v3
+# formulation; adding prior flexibility at the same time would confound the result.
+#
+# Candidates are fitted on train and ranked on tune. The free set is never read.
+candidates:
+  - name: matern_fine
+    prior:
+      kernel: matern
+      tau_density: 0.025
+      correlation_length_angstrom: 0.50
+      alpha: 2.0
+      latent_distribution: gaussian
+  - name: matern_baseline
+    prior:
+      kernel: matern
+      tau_density: 0.040
+      correlation_length_angstrom: 0.75
+      alpha: 2.5
+      latent_distribution: gaussian
+  - name: matern_broad
+    prior:
+      kernel: matern
+      tau_density: 0.050
+      correlation_length_angstrom: 1.50
+      alpha: 2.5
+      latent_distribution: gaussian
+  - name: squared_exponential
+    prior:
+      kernel: squared_exponential
+      tau_density: 0.040
+      correlation_length_angstrom: 0.80
+      latent_distribution: gaussian
