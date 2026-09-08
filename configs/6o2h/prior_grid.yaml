@@ -1,0 +1,72 @@
+# Model comparison is done ONLY on the internal tune subset of the original work set.
+# Free reflections are never read by candidate fitting/selection.
+candidates:
+  - name: matern_fine_t025_l035_a20
+    prior: {kernel: matern, tau_density: 0.025, correlation_length_angstrom: 0.35, alpha: 2.0, latent_distribution: gaussian}
+  - name: matern_fine_t030_l050_a20
+    prior: {kernel: matern, tau_density: 0.030, correlation_length_angstrom: 0.50, alpha: 2.0, latent_distribution: gaussian}
+  - name: matern_mid_t040_l075_a25
+    prior: {kernel: matern, tau_density: 0.040, correlation_length_angstrom: 0.75, alpha: 2.5, latent_distribution: gaussian}
+  - name: matern_mid_t050_l100_a25
+    prior: {kernel: matern, tau_density: 0.050, correlation_length_angstrom: 1.00, alpha: 2.5, latent_distribution: gaussian}
+  - name: matern_coarse_t050_l150_a25
+    prior: {kernel: matern, tau_density: 0.050, correlation_length_angstrom: 1.50, alpha: 2.5, latent_distribution: gaussian}
+  - name: matern_coarse_t060_l250_a30
+    prior: {kernel: matern, tau_density: 0.060, correlation_length_angstrom: 2.50, alpha: 3.0, latent_distribution: gaussian}
+
+  - name: rbf_fine_t025_l035
+    prior: {kernel: squared_exponential, tau_density: 0.025, correlation_length_angstrom: 0.35, alpha: 2.5, latent_distribution: gaussian}
+  - name: rbf_fine_t030_l050
+    prior: {kernel: squared_exponential, tau_density: 0.030, correlation_length_angstrom: 0.50, alpha: 2.5, latent_distribution: gaussian}
+  - name: rbf_mid_t040_l080
+    prior: {kernel: squared_exponential, tau_density: 0.040, correlation_length_angstrom: 0.80, alpha: 2.5, latent_distribution: gaussian}
+  - name: rbf_coarse_t050_l120
+    prior: {kernel: squared_exponential, tau_density: 0.050, correlation_length_angstrom: 1.20, alpha: 2.5, latent_distribution: gaussian}
+
+  - name: white_t010
+    prior: {kernel: bandlimited_white, tau_density: 0.010, correlation_length_angstrom: 1.0, alpha: 2.5, latent_distribution: gaussian}
+  - name: white_t020
+    prior: {kernel: bandlimited_white, tau_density: 0.020, correlation_length_angstrom: 1.0, alpha: 2.5, latent_distribution: gaussian}
+
+  - name: matern_student_t_fine
+    prior: {kernel: matern, tau_density: 0.030, correlation_length_angstrom: 0.50, alpha: 2.0, latent_distribution: student_t, student_t_df: 4.0}
+  - name: matern_student_t_mid
+    prior: {kernel: matern, tau_density: 0.050, correlation_length_angstrom: 1.00, alpha: 2.5, latent_distribution: student_t, student_t_df: 4.0}
+  - name: matern_laplace_fine
+    prior: {kernel: matern, tau_density: 0.030, correlation_length_angstrom: 0.50, alpha: 2.0, latent_distribution: laplace, laplace_softening: 0.001}
+
+  - name: multiscale_narrow
+    prior:
+      kernel: multiscale_matern
+      tau_density: 0.045
+      latent_distribution: gaussian
+      components:
+        - {correlation_length_angstrom: 0.35, alpha: 2.0, weight: 0.50}
+        - {correlation_length_angstrom: 0.90, alpha: 2.5, weight: 0.35}
+        - {correlation_length_angstrom: 2.50, alpha: 3.0, weight: 0.15}
+  - name: multiscale_broad
+    prior:
+      kernel: multiscale_matern
+      tau_density: 0.060
+      latent_distribution: gaussian
+      components:
+        - {correlation_length_angstrom: 0.45, alpha: 2.0, weight: 0.45}
+        - {correlation_length_angstrom: 1.20, alpha: 2.5, weight: 0.35}
+        - {correlation_length_angstrom: 4.00, alpha: 3.0, weight: 0.20}
+
+  - name: robust_likelihood_matern
+    prior: {kernel: matern, tau_density: 0.040, correlation_length_angstrom: 0.75, alpha: 2.5, latent_distribution: gaussian}
+    likelihood: {loss: student_t, student_t_df: 6.0}
+
+  - name: matern_cauchy_fine
+    prior: {kernel: matern, tau_density: 0.030, correlation_length_angstrom: 0.50, alpha: 2.0, latent_distribution: cauchy, cauchy_scale: 1.0}
+  - name: multiscale_student_t
+    prior:
+      kernel: multiscale_matern
+      tau_density: 0.045
+      latent_distribution: student_t
+      student_t_df: 4.0
+      components:
+        - {correlation_length_angstrom: 0.35, alpha: 2.0, weight: 0.50}
+        - {correlation_length_angstrom: 0.90, alpha: 2.5, weight: 0.35}
+        - {correlation_length_angstrom: 2.50, alpha: 3.0, weight: 0.15}
