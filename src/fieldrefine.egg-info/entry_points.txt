@@ -1,0 +1,3 @@
+[console_scripts]
+cfi = crystal_field.cli:app
+fieldrefine = crystal_field.cli:app

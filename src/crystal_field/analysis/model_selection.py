@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import copy
+import datetime
+import hashlib
+import json
+from pathlib import Path
+
+import yaml
+
+from crystal_field.config import AppConfig, dump_config, load_config
+
+
+def _slug(value):
+    return str(value).replace(".", "p").replace("-", "m").replace(" ", "_")
+
+
+def expand_prior_grid(base_config: Path, grid_file: Path, output_dir: Path):
+    base = load_config(base_config)
+    spec = yaml.safe_load(Path(grid_file).read_text())
+    candidates = spec.get("candidates", [])
+    if not candidates:
+        raise ValueError("Prior grid contains no candidates")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = []
+    for i, item in enumerate(candidates):
+        name = item.get("name") or f"candidate_{i:03d}"
+        payload = base.model_dump(mode="json", exclude_none=True)
+        payload["prior"].update(copy.deepcopy(item.get("prior", {})))
+        payload["likelihood"].update(copy.deepcopy(item.get("likelihood", {})))
+        payload["baseline"].update(copy.deepcopy(item.get("baseline", {})))
+        payload["optimizer"]["fit_scope"] = "train"
+        payload["run"]["shared_data_dir"] = str(base.run.data_dir)
+        payload["run"]["output_dir"] = str(base.run.output_dir / "candidates" / name)
+        cfg = AppConfig.model_validate(payload)
+        path = output_dir / f"{i:03d}_{_slug(name)}.yaml"
+        dump_config(cfg, path)
+        manifest.append({"index": i, "name": name, "config": str(path), "output_dir": str(cfg.run.output_dir)})
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    return {"n_candidates": len(manifest), "manifest": str(manifest_path)}
+
+
+def select_prior(base_config: Path, manifest_path: Path, selected_path: Path):
+    base = load_config(base_config)
+    manifest = json.loads(Path(manifest_path).read_text())
+    rows = []
+    for item in manifest:
+        metrics_path = Path(item["output_dir"]) / "fit" / "metrics.json"
+        if not metrics_path.exists():
+            raise FileNotFoundError(f"Missing candidate metrics: {metrics_path}")
+        m = json.loads(metrics_path.read_text())
+        score = float(m["chi2_tune"]) / max(float(m["n_tune"]), 1.0)
+        rows.append({**item, "score": score, "r_tune": float(m["r_tune"]), "r_train": float(m["r_train"])})
+    rows.sort(key=lambda x: (x["score"], x["r_tune"]))
+    winner = rows[0]
+    winner_cfg = load_config(winner["config"])
+    payload = winner_cfg.model_dump(mode="json", exclude_none=True)
+    payload["optimizer"]["fit_scope"] = "work"
+    payload["run"]["output_dir"] = str(base.run.output_dir / "final")
+    payload["run"]["shared_data_dir"] = str(base.run.data_dir)
+    selected = AppConfig.model_validate(payload)
+    dump_config(selected, selected_path)
+    report = {"winner": winner, "ranking": rows, "selected_config": str(selected_path)}
+    report_path = selected_path.with_suffix(".selection.json")
+    report_path.write_text(json.dumps(report, indent=2))
+    return report
+
+
+def sha256_file(path: Path):
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# The free set is consumable: once it has been read, no amount of re-freezing restores it.
+# The ledger therefore lives beside the prepared reflections rather than in a run output
+# directory, so that evaluating, tweaking a hyperparameter, re-freezing into a fresh
+# output_dir and re-evaluating is still caught. It is append-only.
+FREE_SET_LEDGER_NAME = "FREE_SET_LEDGER.json"
+
+
+def free_set_ledger_path(cfg) -> Path:
+    return cfg.run.data_dir / FREE_SET_LEDGER_NAME
+
+
+def read_free_set_ledger(cfg):
+    path = free_set_ledger_path(cfg)
+    if not path.exists():
+        return []
+    entries = json.loads(path.read_text())
+    if not isinstance(entries, list):
+        raise RuntimeError(f"{path} is corrupt: expected a list of evaluation records")
+    return entries
+
+
+def append_free_set_ledger(cfg, entry):
+    path = free_set_ledger_path(cfg)
+    entries = read_free_set_ledger(cfg)
+    entries.append(entry)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries, indent=2))
+    return entries
+
+
+def _consumed_message(entries, action):
+    first = entries[0]
+    return (
+        f"The deposited free set has already been read {len(entries)} time(s) for this prepared "
+        f"split; first at {first.get('timestamp_utc')} under lock {first.get('lock_config_sha256', '')[:12]}. "
+        f"The free-set evaluation is one-shot, so {action} would invalidate the held-out result. "
+        f"See {FREE_SET_LEDGER_NAME}. Re-preparing reflections into a fresh data_dir creates a "
+        "genuinely new split; overriding instead must be reported as a repeated evaluation."
+    )
+
+
+def freeze_model(config_path: Path, allow_after_free_evaluation: bool = False):
+    cfg = load_config(config_path)
+    if cfg.optimizer.fit_scope != "work":
+        raise ValueError("Only a work-refit configuration can be frozen")
+    consumed = read_free_set_ledger(cfg)
+    if consumed and not allow_after_free_evaluation:
+        raise RuntimeError(_consumed_message(consumed, "re-freezing a revised model"))
+    required = [
+        cfg.run.data_dir / "metadata.json",
+        cfg.run.data_dir / "reflections.npz",
+        cfg.run.data_dir / "rho0.npy",
+        cfg.run.data_dir / "solvent_mask.npy",
+        cfg.run.output_dir / "fit" / "z_map.npy",
+        cfg.run.output_dir / "fit" / "metrics.json",
+    ]
+    if cfg.baseline.scaling.enabled:
+        required.append(cfg.run.data_dir / "scaling_work.npz")
+    for path in required:
+        if not path.exists():
+            raise FileNotFoundError(path)
+    lock = {
+        "config": str(config_path),
+        "config_sha256": sha256_file(config_path),
+        "artifacts": {str(p): sha256_file(p) for p in required},
+        # Authoritative record of whether the free set has been read; this file is only
+        # written at freeze time, so it can never report a later evaluation itself.
+        "free_set_ledger": str(free_set_ledger_path(cfg)),
+        "free_set_used_at_freeze": bool(consumed),
+        "note": "Freeze created before free-set evaluation. Do not alter model/hyperparameters after this point.",
+    }
+    lock_path = cfg.run.output_dir / "MODEL_LOCK.json"
+    lock_path.write_text(json.dumps(lock, indent=2))
+    return {"lock": str(lock_path), "config_sha256": lock["config_sha256"]}
+
+
+def verify_lock(config_path: Path, allow_consumed: bool = False):
+    cfg = load_config(config_path)
+    lock_path = cfg.run.output_dir / "MODEL_LOCK.json"
+    if not lock_path.exists():
+        raise RuntimeError("MODEL_LOCK.json is required before free-set evaluation")
+    lock = json.loads(lock_path.read_text())
+    if lock["config_sha256"] != sha256_file(config_path):
+        raise RuntimeError("Configuration changed after MODEL_LOCK.json was created")
+    for p, digest in lock["artifacts"].items():
+        path = Path(p)
+        if not path.exists() or sha256_file(path) != digest:
+            raise RuntimeError(f"Frozen artifact changed after lock: {path}")
+    consumed = read_free_set_ledger(cfg)
+    if consumed and not allow_consumed:
+        raise RuntimeError(_consumed_message(consumed, "another free-set evaluation"))
+    lock["free_set_evaluations"] = consumed
+    return lock
+
+
+def record_free_evaluation(cfg, lock, result_path: Path, summary):
+    """Append a free-set read to the append-only ledger. Called only after the result is written."""
+    entries = read_free_set_ledger(cfg)
+    entry = {
+        "free_set_used": True,
+        "evaluation_index": len(entries) + 1,
+        "timestamp_utc": datetime.datetime.now(datetime.UTC).isoformat(),
+        "lock_config_sha256": lock["config_sha256"],
+        "config": str(lock["config"]),
+        "result_file": str(result_path),
+        "result_sha256": sha256_file(result_path),
+        "reported": summary,
+    }
+    append_free_set_ledger(cfg, entry)
+    return entry

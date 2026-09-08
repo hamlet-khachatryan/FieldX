@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fieldrefine"
+version = "0.3.0"
+description = "GPU-first Bayesian field refinement of crystallographic electron density"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+authors = [{name = "Crystal Field Inference contributors"}]
+keywords = ["crystallography", "electron-density", "jax", "gemmi", "bayesian-inference"]
+dependencies = [
+  "gemmi>=0.7.5,<0.8",
+  "reciprocalspaceship>=1.0.7,<2",
+  "numpy>=2.0,<3",
+  "pandas>=2.2,<3",
+  "pydantic>=2.10,<3",
+  "PyYAML>=6.0,<7",
+  "typer>=0.15,<1",
+  "rich>=13.9,<15",
+  "h5py>=3.12,<4",
+]
+
+[project.optional-dependencies]
+cpu = ["jax>=0.7,<1", "optax>=0.2.5,<1"]
+cuda12 = ["jax[cuda12]>=0.7,<1", "optax>=0.2.5,<1"]
+cuda13 = ["jax[cuda13]>=0.7,<1", "optax>=0.2.5,<1"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+cfi = "crystal_field.cli:app"
+fieldrefine = "crystal_field.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+conflicts = [
+  [{extra = "cpu"}, {extra = "cuda12"}],
+  [{extra = "cpu"}, {extra = "cuda13"}],
+  [{extra = "cuda12"}, {extra = "cuda13"}],
+]
+environments = ["sys_platform != 'Windows'"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "integration: lightweight multi-module integration tests",
+  "gpu: requires a JAX accelerator and runs only through SLURM GPU validation",
+  "cluster: expensive end-to-end tests; never run in local CI",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
