@@ -61,14 +61,28 @@ def model_electron_count(model, spacegroup) -> float:
 
 
 def direct_structure_factors(model, cell, spacegroup, hkls, d_min, scattering="xray"):
-    """Structure factors by direct summation over atoms -- independent of any FFT grid."""
-    calculator = STRUCTURE_FACTOR_CALCULATORS[scattering](cell)
-    calculator.addends.clear()
+    """Structure factors by direct summation over atoms -- independent of any FFT grid.
+
+    Gemmi applies crystallographic symmetry through `UnitCell.images`, which a cell
+    constructed as `gemmi.UnitCell(a, b, c, ...)` does NOT carry: it has zero images, so
+    the sum would cover the asymmetric unit only while rho0 covers the whole cell. In P1
+    those agree, which is why it has to be set up explicitly rather than assumed.
+    setup_cell_images() populates them from the space group.
+    """
     st = gemmi.Structure()
     st.cell = cell
     st.spacegroup_hm = spacegroup.xhm()
     st.add_model(model)
     st.setup_entities()
+    st.setup_cell_images()
+    if len(st.cell.images) + 1 != len(spacegroup.operations()):
+        raise RuntimeError(
+            f"Expected {len(spacegroup.operations())} symmetry operations for {spacegroup.xhm()}, "
+            f"but the unit cell carries {len(st.cell.images) + 1}. Structure-factor summation "
+            "would cover the wrong number of symmetry copies."
+        )
+    calculator = STRUCTURE_FACTOR_CALCULATORS[scattering](st.cell)
+    calculator.addends.clear()
     return np.array(
         [calculator.calculate_sf_from_model(st[0], (int(h), int(k), int(l_))) for h, k, l_ in hkls],
         dtype=np.complex128,

@@ -108,22 +108,74 @@ def test_integrated_density_equals_the_model_electron_count(tmp_path):
     assert integrated == pytest.approx(model_electron_count(st[0], sg), rel=0.01)
 
 
-def test_fft_of_rho0_matches_direct_summation(tmp_path):
-    """An FFT-free reference for the starting density."""
-    from conftest import write_tiny_model
+SYMMETRIC_PDB = """CRYST1{a:9.3f}{b:9.3f}{c:9.3f}{al:7.2f}{be:7.2f}{ga:7.2f} {sg:<11}{z:4d}
+ATOM      1  N   ALA A   1       4.000   5.000   6.000  1.00 12.00           N
+ATOM      2  CA  ALA A   1       5.200   5.400   6.300  1.00 11.00           C
+ATOM      3  C   ALA A   1       6.100   4.300   6.900  1.00 13.00           C
+ATOM      4  O   ALA A   1       7.300   4.500   7.100  1.00 15.00           O
+ATOM      5  S   MET A   2      11.000  12.000  13.000  1.00 20.00           S
+END
+"""
 
-    st = gemmi.read_structure(str(write_tiny_model(tmp_path / "tiny.pdb")))
+HKLS = np.array([[1, 0, 0], [2, 1, 0], [0, 2, 3], [3, -2, 1], [-1, 4, 2], [5, 3, 2]], dtype=np.int32)
+
+# (space group, cell, FFT shape) -- each cell and grid is metrically compatible with its
+# space group; tetragonal and hexagonal groups need a == b and matching grid dimensions.
+SYMMETRIC_CASES = [
+    ("P 1", (30.0, 34.0, 38.0, 90.0, 90.0, 90.0), (48, 54, 60)),
+    ("P 21 21 21", (30.0, 34.0, 38.0, 90.0, 90.0, 90.0), (48, 54, 60)),
+    ("C 2", (30.0, 34.0, 38.0, 90.0, 100.0, 90.0), (48, 54, 60)),
+    ("P 41", (30.0, 30.0, 38.0, 90.0, 90.0, 90.0), (48, 48, 60)),
+    ("P 63", (30.0, 30.0, 38.0, 90.0, 90.0, 120.0), (48, 48, 60)),
+]
+
+
+def _symmetric_model(tmp_path, sg_name, cell_params):
+    sg = gemmi.SpaceGroup(sg_name)
+    a, b, c, al, be, ga = cell_params
+    path = tmp_path / "sym.pdb"
+    path.write_text(SYMMETRIC_PDB.format(a=a, b=b, c=c, al=al, be=be, ga=ga, sg=sg_name, z=len(sg.operations())))
+    st = gemmi.read_structure(str(path))
     st.setup_entities()
-    sg = gemmi.SpaceGroup("P 1")
-    shape = (40, 48, 56)
-    rho, _ = model_density_on_grid(st[0], st.cell, sg, shape, 2.0, 1e-7)
+    # Rebuilt from parameters, exactly as _model_for_metadata() rebuilds it from
+    # metadata.json -- such a cell carries no symmetry images until it is set up.
+    return st, sg, gemmi.UnitCell(*cell_params)
 
-    hkls = np.array([[1, 0, 0], [2, 1, 0], [0, 2, 3], [3, -2, 1], [-1, 4, 2]], dtype=np.int32)
-    direct = direct_structure_factors(st[0], st.cell, sg, hkls, 2.0)
-    fgrid = np.fft.fftn(rho.astype(np.float64)) * (st.cell.volume / rho.size)
-    idx = np.mod(hkls, np.asarray(shape))
-    gridded = np.conj(fgrid[idx[:, 0], idx[:, 1], idx[:, 2]])
-    np.testing.assert_allclose(np.abs(gridded), np.abs(direct), rtol=0.05)
+
+def _grid_amplitudes(rho, volume, hkls):
+    # jnp.fft.fftn uses exp(-2 pi i h.r); Gemmi is exp(+2 pi i h.r), hence the conjugate.
+    fgrid = np.fft.fftn(rho.astype(np.float64)) * (volume / rho.size)
+    idx = np.mod(hkls, np.asarray(rho.shape))
+    return np.abs(np.conj(fgrid[idx[:, 0], idx[:, 1], idx[:, 2]]))
+
+
+@pytest.mark.parametrize(("sg_name", "cell_params", "shape"), SYMMETRIC_CASES, ids=[c[0] for c in SYMMETRIC_CASES])
+def test_fft_of_rho0_matches_direct_summation(tmp_path, sg_name, cell_params, shape):
+    """An FFT-free reference for the starting density, in symmetric space groups too.
+
+    Gemmi applies symmetry through `UnitCell.images`, and a cell rebuilt from parameters
+    has none. Without setting them up the direct sum silently covers only the asymmetric
+    unit while rho0 covers the whole cell. In P1 the two coincide, so only a symmetric
+    space group catches it -- which is why every case below is parametrized.
+    """
+    st, sg, cell = _symmetric_model(tmp_path, sg_name, cell_params)
+    assert len(cell.images) == 0, "a cell built from parameters must start with no images"
+
+    rho, _ = model_density_on_grid(st[0], cell, sg, shape, 2.0, 1e-7)
+    direct = direct_structure_factors(st[0], cell, sg, HKLS, 2.0)
+    measured = _grid_amplitudes(rho, cell.volume, HKLS)
+    reference = np.abs(direct)
+    relative = np.linalg.norm(measured - reference) / max(np.linalg.norm(reference), 1e-30)
+    assert relative < 0.05, f"{sg_name}: relative amplitude error {relative:.1%}"
+
+
+@pytest.mark.parametrize(("sg_name", "cell_params", "shape"), SYMMETRIC_CASES, ids=[c[0] for c in SYMMETRIC_CASES])
+def test_direct_summation_covers_every_symmetry_copy(tmp_path, sg_name, cell_params, shape):
+    """F(000) is the whole cell's electron count: ASU electrons times the group order."""
+    st, sg, cell = _symmetric_model(tmp_path, sg_name, cell_params)
+    per_asu = model_electron_count(st[0], gemmi.SpaceGroup("P 1"))
+    f000 = direct_structure_factors(st[0], cell, sg, np.array([[0, 0, 0]], dtype=np.int32), 2.0)[0]
+    assert float(f000.real) == pytest.approx(per_asu * len(sg.operations()), rel=0.02)
 
 
 def test_grid_shape_follows_cell_dmin_and_sampling(tiny_dataset):
