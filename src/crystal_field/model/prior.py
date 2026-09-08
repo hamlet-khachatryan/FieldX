@@ -5,18 +5,24 @@ import math
 
 def _frequency_axis(n, dtype):
     import jax.numpy as jnp
+
     return jnp.fft.fftfreq(n, d=1.0 / n).astype(dtype)
 
 
 def spectral_geometry(shape, reciprocal_metric, dtype):
     import jax.numpy as jnp
+
     h = _frequency_axis(shape[0], dtype)[:, None, None]
     k = _frequency_axis(shape[1], dtype)[None, :, None]
-    l = _frequency_axis(shape[2], dtype)[None, None, :]
+    ell = _frequency_axis(shape[2], dtype)[None, None, :]
     g = jnp.asarray(reciprocal_metric, dtype=dtype)
     s2 = (
-        g[0, 0] * h * h + g[1, 1] * k * k + g[2, 2] * l * l
-        + 2 * g[0, 1] * h * k + 2 * g[0, 2] * h * l + 2 * g[1, 2] * k * l
+        g[0, 0] * h * h
+        + g[1, 1] * k * k
+        + g[2, 2] * ell * ell
+        + 2 * g[0, 1] * h * k
+        + 2 * g[0, 2] * h * ell
+        + 2 * g[1, 2] * k * ell
     )
     q2 = (2 * math.pi) ** 2 * s2
     return s2, q2
@@ -30,11 +36,13 @@ def _matern_transfer(q2, ell, alpha):
 def _squared_exponential_transfer(q2, ell):
     # Square-root spectral density of a Gaussian covariance, up to normalization.
     import jax.numpy as jnp
+
     return jnp.exp(-0.25 * ell * ell * q2)
 
 
 def build_transfer(shape, reciprocal_metric, unit_cell_volume, d_min_angstrom, prior, dtype):
     import jax.numpy as jnp
+
     s2, q2 = spectral_geometry(shape, reciprocal_metric, dtype)
     if prior.kernel == "matern":
         base = _matern_transfer(q2, prior.correlation_length_angstrom, prior.alpha)
@@ -63,6 +71,7 @@ def build_transfer(shape, reciprocal_metric, unit_cell_volume, d_min_angstrom, p
 
 def apply_transfer(z, transfer, unit_cell_volume):
     import jax.numpy as jnp
+
     zhat = jnp.fft.fftn(z, norm="ortho")
     uhat = transfer * zhat
     scale = jnp.sqrt(jnp.asarray(z.size / unit_cell_volume, dtype=z.dtype))
@@ -71,6 +80,7 @@ def apply_transfer(z, transfer, unit_cell_volume):
 
 def latent_penalty(z, prior):
     import jax.numpy as jnp
+
     if prior.latent_distribution == "gaussian":
         return 0.5 * jnp.sum(z * z)
     if prior.latent_distribution == "student_t":

@@ -30,7 +30,7 @@ def load_problem_arrays(cfg):
         scaling_path = data_dir / f"scaling_{cfg.optimizer.fit_scope}.npz"
         if not scaling_path.exists():
             raise FileNotFoundError(
-                f"Missing {scaling_path}. Run `cfi fit-scaling CONFIG` for fit_scope={cfg.optimizer.fit_scope}."
+                f"Missing {scaling_path}. Run `fieldrefine fit-scaling CONFIG` for fit_scope={cfg.optimizer.fit_scope}."
             )
         scaling = np.load(scaling_path)
         overall_scale = scaling["overall_scale"]

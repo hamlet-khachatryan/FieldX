@@ -14,7 +14,7 @@ def _grid_from_array(array: np.ndarray, cell: gemmi.UnitCell, sg: gemmi.SpaceGro
 
 
 def _gather_grid_values(grid: gemmi.ReciprocalComplexGrid, hkls: np.ndarray) -> np.ndarray:
-    return np.asarray([grid.get_value(int(h), int(k), int(l)) for h, k, l in hkls], dtype=np.complex64)
+    return np.asarray([grid.get_value(int(h), int(k), int(m)) for h, k, m in hkls], dtype=np.complex64)
 
 
 def fit_baseline_scaling(cfg) -> dict:

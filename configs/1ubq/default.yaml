@@ -1,45 +1,63 @@
+# 1UBQ -- ubiquitin, P 21 21 21, 1.80 A. The first v3 experiment, Bragg only.
+#
+# Paths are relative to this file, so the repository-local data/ and runs/ trees work
+# out of the box. On DLS, regenerate with the workspace roots instead:
+#
+#   export FIELDX_DATA_ROOT=/dls/data2temp01/hamlet/workspace/data
+#   export FIELDX_RUNS_ROOT=/dls/data2temp01/hamlet/workspace/runs
+#   uv run fieldrefine init-pdb 1UBQ --force
 run:
-  output_dir: runs/1UBQ
+  output_dir: ../../runs/1UBQ
   seed: 20260907
   enable_x64: false
+
 input:
-  reflections: /Users/hamletkhachatryan/PycharmProjects/FieldX/data/1ubq/1ubq-sf.cif
-  model: /Users/hamletkhachatryan/PycharmProjects/FieldX/data/1ubq/1ubq.cif
+  reflections: ../../data/1ubq/1ubq-sf.cif
+  model: ../../data/1ubq/1ubq.cif
   scattering: xray
   observation_kind: amplitude
   columns:
     observation: FP
     sigma: SIGFP
     free: FreeR_flag
+  # 1UBQ's deposited FreeR_flag column is constant (every reflection carries 1), so it
+  # defines no held-out set. The split therefore uses a deterministic hash holdout, and
+  # the resulting statistic is a genuine held-out test R -- NOT the deposited R-free.
   free_test_value: null
   expected_free_fraction_min: 0.02
   expected_free_fraction_max: 0.15
+
 split:
   strategy: hash
-  tune_fraction_of_work: 0.1
-  final_fraction_if_hash: 0.1
+  tune_fraction_of_work: 0.10
+  final_fraction_if_hash: 0.10
   pair_friedel_when_nonanomalous: true
   anomalous: false
+
 resolution:
   d_min_angstrom: 1.8035861253738403
   d_max_angstrom: 32.7287712097168
+
 grid:
+  # v3 convention. Do not raise this for the first experiment: the pilot tests the
+  # existing v3 formulation, not a sampling change.
   shape: null
   samples_per_dmin: 3.0
+
 prior:
   kernel: matern
-  tau_density: 0.03
+  tau_density: 0.040
   correlation_length_angstrom: 0.75
   alpha: 2.5
   components: []
   remove_mean: true
   latent_distribution: gaussian
   student_t_df: 4.0
-  laplace_softening: 0.001
+  laplace_softening: 1.0e-3
   cauchy_scale: 1.0
+
 baseline:
-  refmac_compatible_density_blur: false
-  density_cutoff: 1.0e-06
+  density_cutoff: 1.0e-6
   bulk_solvent:
     enabled: true
     radii: refmac
@@ -48,26 +66,33 @@ baseline:
   scaling:
     enabled: true
     fit_isotropic_b_first: true
+
 likelihood:
   global_scale: profile
   fixed_scale: 1.0
-  sigma_floor: 1.0e-06
+  sigma_floor: 1.0e-6
   loss: gaussian
   student_t_df: 6.0
+
 optimizer:
+  # The pilot stays small: measure compilation time, time per iteration, GPU memory and
+  # convergence before enlarging anything.
   method: lbfgs
   fit_scope: train
-  max_iterations: 250
-  tolerance: 5.0e-05
+  max_iterations: 100
+  tolerance: 5.0e-5
   lbfgs_memory: 8
-  adam_learning_rate: 0.003
+  adam_learning_rate: 3.0e-3
   checkpoint_every: 10
   validation_patience: 8
-  validation_min_delta: 1.0e-05
+  validation_min_delta: 1.0e-5
+
 information:
-  n_modes: 16
+  n_modes: 8
   max_iterations: 80
-  tolerance: 0.0001
+  tolerance: 1.0e-4
+  memory_budget_gib: 40.0
+
 atomic_benchmark:
   enabled: true
   n_atoms: 8

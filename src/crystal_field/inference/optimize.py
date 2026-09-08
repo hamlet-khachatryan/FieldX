@@ -42,9 +42,7 @@ def run_map_fit(cfg, arrays, objective, metrics, density_from_z):
             updates, state = opt.update(grad, state, z)
         else:
             value, grad = value_grad(z, state=state)
-            updates, state = opt.update(
-                grad, state, z, value=value, grad=grad, value_fn=objective_jit
-            )
+            updates, state = opt.update(grad, state, z, value=value, grad=grad, value_fn=objective_jit)
         z = optax.apply_updates(z, updates)
         grad_norm = optax.tree.norm(grad)
 

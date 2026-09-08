@@ -1,16 +1,47 @@
+"""Declarative configuration schema for FieldX v3.
+
+The v3 model is
+
+    rho(r) = rho0(r) + L_theta z,      z ~ N(0, I)
+
+where rho0 is the atomistically generated starting density and L_theta is a
+spatially correlated, band-limited density-field operator. Every quantity below
+is expressed in physical crystallographic units (Angstrom, Angstrom^-2); nothing
+is expressed in voxels, so changing the FFT grid never changes the prior.
+
+Relative paths in a configuration file are resolved against the directory that
+contains that file, so a config can be committed with repository-relative paths
+and still resolve identically on a laptop and on a cluster.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# Path-valued fields, as (section, key) pairs. Resolution is explicit rather than
+# inferred from the annotation so that adding a path field is a deliberate act.
+PATH_FIELDS = (
+    ("run", "output_dir"),
+    ("run", "shared_data_dir"),
+    ("run", "compilation_cache_dir"),
+    ("input", "reflections"),
+    ("input", "model"),
+    ("input", "diffuse_h5"),
+)
 
 
-class RunConfig(BaseModel):
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RunConfig(Strict):
     output_dir: Path
     shared_data_dir: Path | None = None
-    seed: int = 20260906
+    seed: int = 20260907
     enable_x64: bool = False
     compilation_cache_dir: Path | None = None
 
@@ -19,15 +50,17 @@ class RunConfig(BaseModel):
         return self.shared_data_dir or (self.output_dir / "shared")
 
 
-class ColumnConfig(BaseModel):
+class ColumnConfig(Strict):
     observation: str
     sigma: str
     free: str | None = None
 
 
-class InputConfig(BaseModel):
+class InputConfig(Strict):
     reflections: Path
     model: Path
+    # 6O2H has an associated diffuse-scattering map. v3 never reads it; the path is
+    # recorded so `fieldrefine inspect-h5` can describe it and v4 can consume it.
     diffuse_h5: Path | None = None
     scattering: Literal["xray", "electron", "neutron"] = "xray"
     observation_kind: Literal["amplitude", "intensity"] = "amplitude"
@@ -43,31 +76,70 @@ class InputConfig(BaseModel):
         return self
 
 
-class SplitConfig(BaseModel):
-    strategy: Literal["existing_free_then_hash", "hash"] = "existing_free_then_hash"
+class SplitConfig(Strict):
+    """How reflections are divided into train, tune and free.
+
+    `existing_free_then_hash` uses the deposited free flags. `hash` builds a
+    deterministic Friedel-paired holdout when the entry deposits none -- still a valid
+    cross-validation statistic, though not the deposited crystallographic R-free.
+
+    `none` declares that no held-out set exists at all. The whole dataset becomes work,
+    the only target is R_work, and every free-set stage degrades to a clearly labelled
+    no-op instead of failing. Use it only when a holdout is genuinely impossible: with
+    nothing held out, a lower R_work is not evidence of anything, because a field model
+    with this much capacity can always reduce it.
+    """
+
+    strategy: Literal["existing_free_then_hash", "hash", "none"] = "existing_free_then_hash"
     tune_fraction_of_work: float = Field(0.10, gt=0.0, lt=0.5)
     final_fraction_if_hash: float = Field(0.05, gt=0.0, lt=0.5)
     pair_friedel_when_nonanomalous: bool = True
     anomalous: bool = False
 
 
-class ResolutionConfig(BaseModel):
+class ResolutionConfig(Strict):
     d_min_angstrom: float = Field(gt=0.0)
     d_max_angstrom: float | None = Field(default=None, gt=0.0)
 
 
-class GridConfig(BaseModel):
+class GridConfig(Strict):
+    """Computational FFT grid.
+
+    The physical unit cell and the computational grid are distinct concepts. When
+    `shape` is null the grid is derived from the cell, the experimental d_min and
+    `samples_per_dmin`, rounded up to FFT-friendly dimensions by Gemmi.
+    """
+
     shape: tuple[int, int, int] | None = None
     samples_per_dmin: float = Field(3.0, ge=2.0, le=6.0)
 
+    @model_validator(mode="after")
+    def validate_shape(self):
+        if self.shape is not None:
+            if any(int(n) < 4 for n in self.shape):
+                raise ValueError(f"grid.shape entries must each be at least 4; got {self.shape}")
+            if any(int(n) % 2 for n in self.shape):
+                raise ValueError(
+                    f"grid.shape entries must be even so the Nyquist guard is well defined; got {self.shape}"
+                )
+        return self
 
-class PriorComponent(BaseModel):
+
+class PriorComponent(Strict):
     correlation_length_angstrom: float = Field(gt=0.0)
     alpha: float = Field(2.5, gt=0.0)
     weight: float = Field(gt=0.0)
 
 
-class PriorConfig(BaseModel):
+class PriorConfig(Strict):
+    """Correlated, band-limited density-field prior.
+
+    The purpose of the correlation is that coherent multi-voxel density changes are
+    plausible while isolated single-voxel excursions are strongly disfavored. It is
+    deliberately generic: a meaningful density feature may be unfamiliar or
+    non-atomistic, and the prior must not force every change into an atom.
+    """
+
     kernel: Literal[
         "matern",
         "squared_exponential",
@@ -87,32 +159,37 @@ class PriorConfig(BaseModel):
     @model_validator(mode="after")
     def validate_prior(self):
         if self.kernel == "matern" and self.alpha <= 1.5:
-            raise ValueError("For a 3D Matérn field, alpha should be > 1.5")
-        if self.kernel == "multiscale_matern" and not self.components:
-            raise ValueError("multiscale_matern requires at least one component")
+            raise ValueError("For a 3D Matern field, alpha must exceed 1.5 or the field has no finite variance")
+        if self.kernel == "multiscale_matern":
+            if not self.components:
+                raise ValueError("multiscale_matern requires at least one component")
+            for component in self.components:
+                if component.alpha <= 1.5:
+                    raise ValueError("Each multiscale_matern component needs alpha > 1.5")
+        elif self.components:
+            raise ValueError(f"prior.components is only meaningful for multiscale_matern, not {self.kernel!r}")
         return self
 
 
-class BulkSolventConfig(BaseModel):
+class BulkSolventConfig(Strict):
     enabled: bool = True
     radii: Literal["refmac", "cctbx", "van_der_waals"] = "refmac"
     k_sol: float = Field(0.35, ge=0.0)
     b_sol_angstrom2: float = Field(46.0, ge=0.0)
 
 
-class ScalingConfig(BaseModel):
+class ScalingConfig(Strict):
     enabled: bool = True
     fit_isotropic_b_first: bool = True
 
 
-class BaselineConfig(BaseModel):
-    refmac_compatible_density_blur: bool = False
+class BaselineConfig(Strict):
     density_cutoff: float = Field(1e-6, gt=0.0)
     bulk_solvent: BulkSolventConfig = Field(default_factory=BulkSolventConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
 
 
-class LikelihoodConfig(BaseModel):
+class LikelihoodConfig(Strict):
     global_scale: Literal["profile", "fixed"] = "profile"
     fixed_scale: float = Field(1.0, gt=0.0)
     sigma_floor: float = Field(1e-6, gt=0.0)
@@ -120,7 +197,7 @@ class LikelihoodConfig(BaseModel):
     student_t_df: float = Field(6.0, gt=2.0)
 
 
-class OptimizerConfig(BaseModel):
+class OptimizerConfig(Strict):
     method: Literal["lbfgs", "adam"] = "lbfgs"
     fit_scope: Literal["train", "work"] = "train"
     max_iterations: int = Field(300, ge=1)
@@ -132,13 +209,16 @@ class OptimizerConfig(BaseModel):
     validation_min_delta: float = Field(1e-5, ge=0.0)
 
 
-class InformationConfig(BaseModel):
+class InformationConfig(Strict):
     n_modes: int = Field(16, ge=1)
     max_iterations: int = Field(80, ge=1)
     tolerance: float = Field(1e-4, gt=0.0)
+    # LOBPCG carries a 3k-wide basis of full latent fields. Refuse to launch a job
+    # whose estimate exceeds this rather than discovering it as an OOM hours in.
+    memory_budget_gib: float = Field(40.0, gt=0.0)
 
 
-class AtomicBenchmarkConfig(BaseModel):
+class AtomicBenchmarkConfig(Strict):
     enabled: bool = True
     n_atoms: int = Field(8, ge=1)
     coordinate_delta_angstrom: float = Field(0.02, gt=0.0)
@@ -146,7 +226,7 @@ class AtomicBenchmarkConfig(BaseModel):
     occupancy_delta: float = Field(0.02, gt=0.0, lt=0.5)
 
 
-class AppConfig(BaseModel):
+class AppConfig(Strict):
     run: RunConfig
     input: InputConfig
     split: SplitConfig = Field(default_factory=SplitConfig)
@@ -159,6 +239,11 @@ class AppConfig(BaseModel):
     information: InformationConfig = Field(default_factory=InformationConfig)
     atomic_benchmark: AtomicBenchmarkConfig = Field(default_factory=AtomicBenchmarkConfig)
 
+    @property
+    def has_free_set(self) -> bool:
+        """False when the configuration declares that no held-out set exists."""
+        return self.split.strategy != "none"
+
     @model_validator(mode="after")
     def validate_global(self):
         if self.split.strategy == "existing_free_then_hash":
@@ -168,61 +253,77 @@ class AppConfig(BaseModel):
                 raise ValueError("input.free_test_value is required for existing_free_then_hash")
         if self.baseline.scaling.enabled and self.input.observation_kind != "amplitude":
             raise ValueError("Gemmi baseline scaling currently requires amplitude observations")
-        if self.baseline.refmac_compatible_density_blur:
-            raise ValueError(
-                "The inferred field must use an unblurred physical density grid. "
-                "Keep baseline.refmac_compatible_density_blur=false for v1."
-            )
         if self.split.anomalous:
             raise ValueError(
-                "v1 models a real-valued mean density and does not support anomalous differences. "
-                "Use non-anomalous merged amplitudes/intensities for v1."
+                "v3 models a real-valued mean density and does not support anomalous differences. "
+                "Use non-anomalous merged amplitudes or intensities."
             )
-        if self.resolution.d_max_angstrom is not None and self.resolution.d_max_angstrom < self.resolution.d_min_angstrom:
+        if (
+            self.resolution.d_max_angstrom is not None
+            and self.resolution.d_max_angstrom < self.resolution.d_min_angstrom
+        ):
             raise ValueError("resolution.d_max_angstrom must be >= d_min_angstrom")
         return self
 
 
+def resolve_payload_paths(payload: dict, base_dir: Path) -> dict:
+    """Make every relative path in a raw config payload absolute against `base_dir`."""
+    base_dir = Path(base_dir).resolve()
+    for section, key in PATH_FIELDS:
+        block = payload.get(section)
+        if not isinstance(block, dict):
+            continue
+        value = block.get(key)
+        if value in (None, ""):
+            continue
+        path = Path(value)
+        block[key] = str(path if path.is_absolute() else (base_dir / path).resolve())
+    return payload
+
+
 def load_config(path: str | Path) -> AppConfig:
-    with Path(path).open("r", encoding="utf-8") as fh:
-        payload = yaml.safe_load(fh)
-    return AppConfig.model_validate(payload)
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Configuration file not found: {path}")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} does not contain a YAML mapping")
+    return AppConfig.model_validate(resolve_payload_paths(payload, path.parent))
 
 
 def dump_config(cfg: AppConfig, path: str | Path) -> None:
+    """Write a config with absolute paths, so a dumped config is location-independent."""
     payload = cfg.model_dump(mode="json", exclude_none=True)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
-def write_pdb_template(path: Path, entry: dict, refl: dict) -> None:
-    payload = {
-        "run": {"output_dir": str(path.parent.parent.parent / "runs" / entry["pdb_id"]), "seed": 20260907, "enable_x64": False},
-        "input": {
-            "reflections": str(Path(entry["reflections"]).resolve()),
-            "model": str(Path(entry["model"]).resolve()),
-            "scattering": "xray",
-            "observation_kind": "amplitude",
-            "columns": {"observation": refl["observation"], "sigma": refl["sigma"], "free": refl["free"]},
-            "free_test_value": refl["free_test_value"],
-        },
-        "split": {
-            "strategy": "existing_free_then_hash" if refl["free"] and refl["free_test_value"] is not None else "hash",
-            "tune_fraction_of_work": 0.10,
-            "final_fraction_if_hash": 0.10,
-            "pair_friedel_when_nonanomalous": True,
-            "anomalous": False,
-        },
-        "resolution": {"d_min_angstrom": float(refl["d_min"]), "d_max_angstrom": float(refl["d_max"])},
-        "grid": {"shape": None, "samples_per_dmin": 3.0},
-        "prior": {"kernel": "matern", "tau_density": 0.03, "correlation_length_angstrom": 0.75, "alpha": 2.5, "components": [], "remove_mean": True, "latent_distribution": "gaussian", "student_t_df": 4.0, "laplace_softening": 1e-3, "cauchy_scale": 1.0},
-        "baseline": {"refmac_compatible_density_blur": False, "density_cutoff": 1e-6, "bulk_solvent": {"enabled": True, "radii": "refmac", "k_sol": 0.35, "b_sol_angstrom2": 46.0}, "scaling": {"enabled": True, "fit_isotropic_b_first": True}},
-        "likelihood": {"global_scale": "profile", "fixed_scale": 1.0, "sigma_floor": 1e-6, "loss": "gaussian", "student_t_df": 6.0},
-        "optimizer": {"method": "lbfgs", "fit_scope": "train", "max_iterations": 250, "tolerance": 5e-5, "lbfgs_memory": 8, "adam_learning_rate": 3e-3, "checkpoint_every": 10, "validation_patience": 8, "validation_min_delta": 1e-5},
-        "information": {"n_modes": 16, "max_iterations": 80, "tolerance": 1e-4},
-        "atomic_benchmark": {"enabled": True, "n_atoms": 8, "coordinate_delta_angstrom": 0.02, "b_delta_angstrom2": 0.5, "occupancy_delta": 0.02},
+def check_config(path: str | Path) -> dict:
+    """Schema validation plus the input checks that are cheap on a login node."""
+    cfg = load_config(path)
+    problems = []
+    for label, target in (("input.reflections", cfg.input.reflections), ("input.model", cfg.input.model)):
+        if not target.is_file():
+            problems.append(f"{label} does not exist: {target}")
+    if cfg.input.diffuse_h5 is not None and not cfg.input.diffuse_h5.is_file():
+        problems.append(f"input.diffuse_h5 does not exist: {cfg.input.diffuse_h5}")
+    if cfg.split.strategy == "existing_free_then_hash" and not cfg.input.columns.free:
+        problems.append("split.strategy=existing_free_then_hash needs input.columns.free")
+    if problems:
+        raise ValueError("Configuration is not usable:\n  - " + "\n  - ".join(problems))
+    return {
+        "config": str(Path(path).resolve()),
+        "output_dir": str(cfg.run.output_dir),
+        "data_dir": str(cfg.run.data_dir),
+        "reflections": str(cfg.input.reflections),
+        "model": str(cfg.input.model),
+        "d_min_angstrom": cfg.resolution.d_min_angstrom,
+        "samples_per_dmin": cfg.grid.samples_per_dmin,
+        "split_strategy": cfg.split.strategy,
+        "has_free_set": cfg.has_free_set,
+        "target": "R_work and R_free" if cfg.has_free_set else "R_work only (no held-out set)",
+        "prior_kernel": cfg.prior.kernel,
+        "latent_distribution": cfg.prior.latent_distribution,
+        "fit_scope": cfg.optimizer.fit_scope,
+        "ok": True,
     }
-    payload["input"]["expected_free_fraction_min"] = 0.02
-    payload["input"]["expected_free_fraction_max"] = 0.15
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")

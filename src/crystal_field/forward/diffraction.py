@@ -9,11 +9,13 @@ import math
 # conjugate here without also flipping the phase sign in symmetry_projected_fcalc().
 def fft_structure_factor_grid(rho, unit_cell_volume):
     import jax.numpy as jnp
+
     return jnp.fft.fftn(rho) * (unit_cell_volume / rho.size)
 
 
 def gather_hkl(grid, hkls):
     import jax.numpy as jnp
+
     idx = jnp.mod(hkls, jnp.asarray(grid.shape, dtype=hkls.dtype))
     return grid[idx[:, 0], idx[:, 1], idx[:, 2]]
 
@@ -21,6 +23,7 @@ def gather_hkl(grid, hkls):
 def symmetry_projected_fcalc(fgrid, hkls, rotations, translations):
     import jax
     import jax.numpy as jnp
+
     hkls = jnp.asarray(hkls, dtype=jnp.int32)
     rotations = jnp.asarray(rotations, dtype=jnp.int32)
     translations = jnp.asarray(translations, dtype=fgrid.real.dtype)
@@ -37,6 +40,7 @@ def symmetry_projected_fcalc(fgrid, hkls, rotations, translations):
 
 def observable_from_fcalc(fcalc, kind):
     import jax.numpy as jnp
+
     amp = jnp.abs(fcalc)
     if kind == "amplitude":
         return amp
@@ -47,6 +51,7 @@ def observable_from_fcalc(fcalc, kind):
 
 def solvent_attenuation(hkls, reciprocal_metric, b_sol, dtype):
     import jax.numpy as jnp
+
     h = hkls.astype(dtype)
     g = reciprocal_metric.astype(dtype)
     s2 = jnp.einsum("ni,ij,nj->n", h, g, h)

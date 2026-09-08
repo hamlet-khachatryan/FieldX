@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=cfi-prior
+#SBATCH --job-name=fieldx-prior
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=6
@@ -9,18 +9,28 @@
 #SBATCH --output=slurm-%x-%A_%a.out
 #SBATCH --error=slurm-%x-%A_%a.err
 set -euo pipefail
-: "${CFI_PRIOR_MANIFEST:?Set CFI_PRIOR_MANIFEST}"
+# SLURM stages this script outside the repository, so "$0" must never be used
+# to locate project files. Everything resolves from SLURM_SUBMIT_DIR.
+cd "$SLURM_SUBMIT_DIR"
+source "$SLURM_SUBMIT_DIR/slurm/common.sh"
+fieldx_load_cuda
+
+: "${CFI_PRIOR_MANIFEST:?Set CFI_PRIOR_MANIFEST to the prior-candidate manifest}"
 : "${SLURM_ARRAY_TASK_ID:?This job must run as a SLURM array}"
-: "${CFI_UV_ENV:?Set CFI_UV_ENV}"
-PROJECT_ROOT="${CFI_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-export UV_PROJECT_ENVIRONMENT="$CFI_UV_ENV"
-CFI_CONFIG="$(uv run --project "$PROJECT_ROOT" --frozen --no-sync python - "$CFI_PRIOR_MANIFEST" "$SLURM_ARRAY_TASK_ID" <<'PY'
+
+# Each array task fits exactly one prior candidate on the train subset. Candidates are
+# independent, so they parallelise across the array with no shared state.
+CFI_CONFIG="$(run_uv python - "$CFI_PRIOR_MANIFEST" "$SLURM_ARRAY_TASK_ID" <<'PY'
 import json
 import sys
-manifest = json.load(open(sys.argv[1]))
-print(manifest[int(sys.argv[2])]["config"])
+
+manifest = json.loads(open(sys.argv[1]).read())
+index = int(sys.argv[2])
+if not 0 <= index < len(manifest):
+    raise SystemExit(f"array index {index} out of range for {len(manifest)} candidates")
+print(manifest[index]["config"])
 PY
 )"
-export CFI_CONFIG CFI_PROJECT_ROOT
-source "$(dirname "$0")/common.sh"
+export CFI_CONFIG
+echo "candidate $SLURM_ARRAY_TASK_ID: $CFI_CONFIG"
 run_cfi fit-map

@@ -27,9 +27,11 @@ def run_information_spectrum(cfg, arrays, residuals_for_split):
             return action_vec(x)
         return jax.lax.map(action_vec, x.T).T
 
+    # Fail before allocating a 3k-wide basis of full latent fields, not hours in.
+    from crystal_field.hpc import check_information_budget
+
+    budget = check_information_budget(cfg)
     n, k = z0.size, cfg.information.n_modes
-    if not (0 < 5 * k < n):
-        raise ValueError(f"JAX LOBPCG requires 0 < 5*k < n; got k={k}, n={n}")
     x0 = jax.random.normal(jax.random.PRNGKey(cfg.run.seed), (n, k), dtype=z0.dtype)
     theta, vecs, iters = lobpcg_standard(action, x0, m=cfg.information.max_iterations, tol=cfg.information.tolerance)
     theta_np = np.asarray(jax.device_get(theta))
@@ -43,6 +45,7 @@ def run_information_spectrum(cfg, arrays, residuals_for_split):
     )
     summary = {
         "n_modes": int(k),
+        "estimated_gpu_GiB": budget["estimated_gpu_GiB_information"],
         "lobpcg_iterations": int(iters),
         "eigenvalues": theta_np.tolist(),
         "d_eff_lower_bound_from_top_modes": float(np.sum(theta_np / (1 + theta_np))),

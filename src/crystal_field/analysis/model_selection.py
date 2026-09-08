@@ -16,17 +16,30 @@ def _slug(value):
 
 
 def expand_prior_grid(base_config: Path, grid_file: Path, output_dir: Path):
+    """One candidate configuration per prior-grid entry, all fitted on train only."""
     base = load_config(base_config)
-    spec = yaml.safe_load(Path(grid_file).read_text())
-    candidates = spec.get("candidates", [])
+    grid_path = Path(grid_file)
+    if not grid_path.is_file():
+        raise FileNotFoundError(f"Prior grid not found: {grid_path}")
+    spec = yaml.safe_load(grid_path.read_text())
+    candidates = (spec or {}).get("candidates", [])
     if not candidates:
-        raise ValueError("Prior grid contains no candidates")
+        raise ValueError(f"{grid_path} contains no candidates")
+    names = [item.get("name") for item in candidates if item.get("name")]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{grid_path} has duplicate candidate names: {sorted(names)}")
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
     for i, item in enumerate(candidates):
         name = item.get("name") or f"candidate_{i:03d}"
         payload = base.model_dump(mode="json", exclude_none=True)
-        payload["prior"].update(copy.deepcopy(item.get("prior", {})))
+        prior_override = copy.deepcopy(item.get("prior", {}))
+        # components only mean anything for multiscale_matern; a candidate that switches
+        # away from it must not inherit the base configuration's component list.
+        if prior_override.get("kernel") not in (None, "multiscale_matern") and "components" not in prior_override:
+            prior_override["components"] = []
+        payload["prior"].update(prior_override)
         payload["likelihood"].update(copy.deepcopy(item.get("likelihood", {})))
         payload["baseline"].update(copy.deepcopy(item.get("baseline", {})))
         payload["optimizer"]["fit_scope"] = "train"
@@ -130,6 +143,9 @@ def freeze_model(config_path: Path, allow_after_free_evaluation: bool = False):
         cfg.run.data_dir / "solvent_mask.npy",
         cfg.run.output_dir / "fit" / "z_map.npy",
         cfg.run.output_dir / "fit" / "metrics.json",
+        # The information spectrum is part of the frozen record, so the DAG cannot be
+        # short-circuited into freezing a model that was never characterised.
+        cfg.run.output_dir / "info_spectrum.json",
     ]
     if cfg.baseline.scaling.enabled:
         required.append(cfg.run.data_dir / "scaling_work.npz")
@@ -144,7 +160,9 @@ def freeze_model(config_path: Path, allow_after_free_evaluation: bool = False):
         # written at freeze time, so it can never report a later evaluation itself.
         "free_set_ledger": str(free_set_ledger_path(cfg)),
         "free_set_used_at_freeze": bool(consumed),
-        "note": "Freeze created before free-set evaluation. Do not alter model/hyperparameters after this point.",
+        "has_free_set": cfg.has_free_set,
+        "target": "R_work and R_free" if cfg.has_free_set else "R_work only (no held-out set)",
+        "note": "Freeze created before free-set evaluation. Do not alter model or hyperparameters after this point.",
     }
     lock_path = cfg.run.output_dir / "MODEL_LOCK.json"
     lock_path.write_text(json.dumps(lock, indent=2))

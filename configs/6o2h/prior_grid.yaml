@@ -1,5 +1,9 @@
+# Exploratory grid for the 6O2H benchmark. Broader than the v3 pilot grid: it adds
+# band-limited white and multiscale controls plus heavy-tailed latent statistics.
+# Do NOT use this shape of grid for a first experiment on a new dataset.
+#
 # Model comparison is done ONLY on the internal tune subset of the original work set.
-# Free reflections are never read by candidate fitting/selection.
+# Free reflections are never read by candidate fitting or selection.
 candidates:
   - name: matern_fine_t025_l035_a20
     prior: {kernel: matern, tau_density: 0.025, correlation_length_angstrom: 0.35, alpha: 2.0, latent_distribution: gaussian}

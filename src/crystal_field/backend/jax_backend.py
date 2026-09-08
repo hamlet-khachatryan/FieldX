@@ -5,6 +5,7 @@ import contextlib
 
 def configure_jax(enable_x64: bool, compilation_cache_dir=None):
     import jax
+
     jax.config.update("jax_enable_x64", bool(enable_x64))
     if compilation_cache_dir is not None:
         with contextlib.suppress(Exception):
@@ -14,6 +15,7 @@ def configure_jax(enable_x64: bool, compilation_cache_dir=None):
 
 def device_report():
     import jax
+
     ds = jax.devices()
     return {
         "jax_version": jax.__version__,

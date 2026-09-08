@@ -1,3 +1,10 @@
+"""FieldX command line.
+
+Every command takes a configuration path. Login-node commands (inspect, config-check,
+init-pdb, expand-priors, estimate-memory, select-prior, freeze-model) do no accelerator
+work; everything else is intended to run inside a SLURM GPU job.
+"""
+
 from __future__ import annotations
 
 import json
@@ -9,7 +16,22 @@ from rich import print
 
 from crystal_field.config import load_config
 
-app = typer.Typer(no_args_is_help=True, help="Crystal Field Inference: GPU-first crystallographic density-field refinement")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="FieldX: correlated density-field refinement of crystallographic electron density (v3)",
+)
+
+
+DATA_ROOT_OPTION = typer.Option(None, help="Where datasets live; defaults to $FIELDX_DATA_ROOT or ./data")
+RUNS_ROOT_OPTION = typer.Option(None, help="Where runs live; defaults to $FIELDX_RUNS_ROOT or ./runs")
+CONFIG_OUT_OPTION = typer.Option(None, help="Config path; defaults to configs/<pdbid>/default.yaml")
+FORCE_OPTION = typer.Option(False, "--force", help="Regenerate an existing config and prior grid")
+NO_FREE_SET_OPTION = typer.Option(
+    False,
+    "--no-free-set",
+    help="Hold nothing out: split.strategy=none, target R_work only. R_free is then undefined "
+    "and the primary criterion cannot be evaluated.",
+)
 
 
 def _cfg(path):
@@ -18,60 +40,86 @@ def _cfg(path):
 
 def _configure(cfg):
     from crystal_field.backend.jax_backend import configure_jax
+
     configure_jax(cfg.run.enable_x64, cfg.run.compilation_cache_dir)
 
 
 @app.command("config-check")
 def config_check(config: Path):
-    print(_cfg(config).model_dump(mode="json"))
+    """Validate a configuration and its inputs without touching an accelerator."""
+    from crystal_field.config import check_config
 
+    print(json.dumps(check_config(config), indent=2))
 
 
 @app.command("init-pdb")
-def init_pdb(pdb_id: str, data_root: Path = Path("data"), config_out: Path | None = None):
-    from crystal_field.crystallography.pdb import discover_reflection_columns, download_pdb_entry
-    info = download_pdb_entry(pdb_id, data_root)
-    refl = discover_reflection_columns(info["reflections"])
-    from crystal_field.config import write_pdb_template
-    out = config_out or Path("configs") / pdb_id.lower() / "default.yaml"
-    write_pdb_template(out, info, refl)
-    print(json.dumps({"config": str(out), "entry": info, "reflections": refl}, indent=2))
+def init_pdb(
+    pdb_id: str,
+    data_root: Path | None = DATA_ROOT_OPTION,
+    runs_root: Path | None = RUNS_ROOT_OPTION,
+    config_out: Path | None = CONFIG_OUT_OPTION,
+    force: bool = FORCE_OPTION,
+    no_free_set: bool = NO_FREE_SET_OPTION,
+):
+    """Download a PDB entry and write its configuration and dataset-specific prior grid."""
+    from crystal_field.dataset_init import init_pdb_dataset
+
+    print(json.dumps(init_pdb_dataset(pdb_id, data_root, runs_root, config_out, force, no_free_set), indent=2))
+
 
 @app.command()
 def inspect(config: Path):
+    """Report reflection metadata, column suggestions and the derived FFT grid."""
     from crystal_field.crystallography.io import inspect_dataset
+
     print(json.dumps(inspect_dataset(_cfg(config)), indent=2))
 
 
 @app.command("inspect-h5")
 def inspect_h5(config: Path):
+    """Describe the associated diffuse-scattering file. v3 never uses its contents."""
     cfg = _cfg(config)
     if cfg.input.diffuse_h5 is None:
         raise typer.BadParameter("input.diffuse_h5 is not configured")
     from crystal_field.crystallography.io import inspect_h5 as inspect_h5_file
+
     print(json.dumps(inspect_h5_file(cfg.input.diffuse_h5), indent=2))
 
 
 @app.command()
 def prepare(config: Path):
+    """Filter reflections and write the immutable train/tune/free split."""
     from crystal_field.crystallography.io import prepare_reflections
+
     print(json.dumps(prepare_reflections(_cfg(config)), indent=2))
 
 
 @app.command("make-rho0")
 def make_rho0(config: Path):
+    """Build the starting atomistic density on the declared grid."""
     from crystal_field.crystallography.io import make_model_density
+
     print(json.dumps(make_model_density(_cfg(config)), indent=2))
+
+
+@app.command("check-rho0")
+def check_rho0(config: Path):
+    """Verify rho0 against the crystallographic model (electron count and direct-sum F)."""
+    from crystal_field.crystallography.io import check_model_density
+
+    print(json.dumps(check_model_density(_cfg(config)), indent=2))
 
 
 @app.command("make-solvent-mask")
 def make_solvent_mask(config: Path):
-    from crystal_field.crystallography.io import make_solvent_mask
-    print(json.dumps(make_solvent_mask(_cfg(config)), indent=2))
+    from crystal_field.crystallography.io import make_solvent_mask as build_mask
+
+    print(json.dumps(build_mask(_cfg(config)), indent=2))
 
 
 @app.command("fit-scaling")
 def fit_scaling(config: Path):
+    """Fit the Gemmi overall/bulk-solvent nuisance scaling on the current fit scope."""
     from crystal_field.crystallography.scaling import fit_baseline_scaling
 
     print(json.dumps(fit_baseline_scaling(_cfg(config)), indent=2))
@@ -82,17 +130,21 @@ def device_report(config: Path):
     cfg = _cfg(config)
     _configure(cfg)
     from crystal_field.backend.jax_backend import device_report as report
+
     print(json.dumps(report(), indent=2))
 
 
 @app.command("estimate-memory")
 def estimate_memory_cmd(config: Path):
+    """Estimate GPU memory for the field, FFT buffers, optimizer state and LOBPCG basis."""
     from crystal_field.hpc import estimate_memory
+
     print(json.dumps(estimate_memory(_cfg(config)), indent=2))
 
 
 @app.command("baseline-metrics")
 def baseline_metrics(config: Path):
+    """Metrics of the unmodified atomic baseline, i.e. the field model at z = 0."""
     cfg = _cfg(config)
     _configure(cfg)
     import jax
@@ -100,10 +152,10 @@ def baseline_metrics(config: Path):
 
     from crystal_field.inference.problem import build_functions
     from crystal_field.inference.runtime import load_problem_arrays
+
     arrays = load_problem_arrays(cfg)
     *_, metrics, _ = build_functions(arrays, cfg)
-    z = jnp.zeros_like(arrays.rho0)
-    result = {k: float(v) for k, v in jax.jit(metrics)(z).items()}
+    result = {k: float(v) for k, v in jax.jit(metrics)(jnp.zeros_like(arrays.rho0)).items()}
     cfg.run.output_dir.mkdir(parents=True, exist_ok=True)
     (cfg.run.output_dir / "baseline_metrics.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
@@ -115,6 +167,7 @@ def fft_check(config: Path):
     _configure(cfg)
     from crystal_field.inference.runtime import load_problem_arrays
     from crystal_field.validation.fft_check import run_fft_check
+
     print(json.dumps(run_fft_check(cfg, load_problem_arrays(cfg)), indent=2))
 
 
@@ -125,6 +178,7 @@ def derivative_check(config: Path):
     from crystal_field.inference.problem import build_functions
     from crystal_field.inference.runtime import load_problem_arrays
     from crystal_field.validation.derivatives import run_derivative_check
+
     arrays = load_problem_arrays(cfg)
     *_, residuals, objective, _, _ = build_functions(arrays, cfg)
     print(json.dumps(run_derivative_check(cfg, arrays, residuals, objective), indent=2))
@@ -132,6 +186,7 @@ def derivative_check(config: Path):
 
 @app.command("atomic-benchmark")
 def atomic_benchmark(config: Path):
+    """Latent cost of elementary atomic refinement directions under the current prior."""
     cfg = _cfg(config)
     _configure(cfg)
     from crystal_field.crystallography.atomic_benchmark import run_atomic_benchmark
@@ -146,6 +201,7 @@ def information_spectrum(config: Path):
     from crystal_field.inference.information import run_information_spectrum
     from crystal_field.inference.problem import build_functions
     from crystal_field.inference.runtime import load_problem_arrays
+
     arrays = load_problem_arrays(cfg)
     _, _, _, residuals, _, _, _ = build_functions(arrays, cfg)
     print(json.dumps(run_information_spectrum(cfg, arrays, residuals), indent=2))
@@ -159,6 +215,7 @@ def fit_map(config: Path):
     from crystal_field.inference.problem import build_functions
     from crystal_field.inference.runtime import load_problem_arrays
     from crystal_field.output import write_fit_map
+
     arrays = load_problem_arrays(cfg)
     _, density, _, _, objective, metrics, _ = build_functions(arrays, cfg)
     result = run_map_fit(cfg, arrays, objective, metrics, density)
@@ -168,13 +225,17 @@ def fit_map(config: Path):
 
 @app.command("expand-priors")
 def expand_priors(base_config: Path, prior_grid: Path, output_dir: Path):
+    """Expand a prior grid into one candidate configuration per candidate."""
     from crystal_field.analysis.model_selection import expand_prior_grid
+
     print(json.dumps(expand_prior_grid(base_config, prior_grid, output_dir), indent=2))
 
 
 @app.command("select-prior")
 def select_prior(base_config: Path, manifest: Path, selected_config: Path):
+    """Rank candidates on the tune subset only and emit the work-scope refit config."""
     from crystal_field.analysis.model_selection import select_prior as do_select
+
     print(json.dumps(do_select(base_config, manifest, selected_config), indent=2))
 
 
@@ -185,10 +246,12 @@ def freeze_model(
         False,
         "--allow-after-free-evaluation",
         help="Re-freeze a revised model even though the free set has already been read. "
-             "This forfeits the held-out status of the free set; the repeat is recorded.",
+        "This forfeits the held-out status of the free set; the repeat is recorded.",
     ),
 ):
+    """Hash the final model into MODEL_LOCK.json. Nothing may change after this point."""
     from crystal_field.analysis.model_selection import freeze_model as do_freeze
+
     print(json.dumps(do_freeze(config, allow_after_free_evaluation=allow_after_free_evaluation), indent=2))
 
 
@@ -199,9 +262,10 @@ def evaluate_free(
         False,
         "--allow-repeat-free-evaluation",
         help="Read the free set again after it has already been evaluated. The one-shot "
-             "guarantee is void; the repeat is written to a separate file and recorded.",
+        "guarantee is void; the repeat is written to a separate file and recorded.",
     ),
 ):
+    """One-shot free-set evaluation. Nothing is optimized here."""
     cfg = _cfg(config)
     from crystal_field.analysis.model_selection import (
         free_set_ledger_path,
@@ -209,6 +273,28 @@ def evaluate_free(
         record_free_evaluation,
         verify_lock,
     )
+
+    if not cfg.has_free_set:
+        # Nothing is held out, so there is nothing to consume and nothing to verify a
+        # lock against. Report that plainly and stop; this is not an error condition.
+        report = {
+            "has_free_set": False,
+            "split_strategy": cfg.split.strategy,
+            "target": "R_work only",
+            "primary_criterion_met": None,
+            "note": (
+                "This configuration declares no held-out set, so R_free does not exist and the "
+                "primary criterion (R_work AND R_free both improving) cannot be evaluated. A lower "
+                "R_work alone is not evidence of recovered density: a correlated field of this "
+                "capacity can reduce R_work without predicting anything. Read "
+                "final/fit/metrics.json for the work-set result."
+            ),
+        }
+        cfg.run.output_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.run.output_dir / "FREE_EVALUATION_SKIPPED.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
+        return
+
     lock = verify_lock(config, allow_consumed=allow_repeat_free_evaluation)
     if cfg.optimizer.fit_scope != "work":
         raise typer.BadParameter("Free evaluation requires optimizer.fit_scope=work")
@@ -229,32 +315,54 @@ def evaluate_free(
 
     from crystal_field.inference.problem import build_functions
     from crystal_field.inference.runtime import load_problem_arrays
+
     arrays = load_problem_arrays(cfg)
+    if not int(np.sum(np.asarray(arrays.split) == 2)):
+        raise typer.BadParameter(
+            "The prepared split contains no free reflections even though "
+            f"split.strategy={cfg.split.strategy!r} declares one. Re-run `fieldrefine prepare`, "
+            "or set split.strategy=none to target R_work only."
+        )
     *_, metrics, free_metrics = build_functions(arrays, cfg)
     z = jnp.asarray(np.load(cfg.run.output_dir / "fit" / "z_map.npy"), dtype=arrays.rho0.dtype)
     z0 = jnp.zeros_like(z)
-    free_fn = jax.jit(free_metrics)
-    work_fn = jax.jit(metrics)
-    field_free = {k: float(v) for k, v in free_fn(z).items()}
-    base_free = {k: float(v) for k, v in free_fn(z0).items()}
-    field_work = {k: float(v) for k, v in work_fn(z).items()}
-    base_work = {k: float(v) for k, v in work_fn(z0).items()}
+    free_fn, work_fn = jax.jit(free_metrics), jax.jit(metrics)
+
+    # z = 0 is exactly the atomic baseline under the same nuisance scaling, so the two
+    # models are compared on identical reflections with identical calibration.
+    r_work_atomic = float(work_fn(z0)["r_work"])
+    r_work_field = float(work_fn(z)["r_work"])
+    r_free_atomic = float(free_fn(z0)["r_free"])
+    r_free_field = float(free_fn(z)["r_free"])
+    gap_atomic = r_free_atomic - r_work_atomic
+    gap_field = r_free_field - r_work_field
+
     result = {
-        "baseline": {"r_work": base_work["r_work"], "r_free": base_free["r_free"]},
-        "field": {"r_work": field_work["r_work"], "r_free": field_free["r_free"]},
-        "delta": {
-            "r_work": field_work["r_work"] - base_work["r_work"],
-            "r_free": field_free["r_free"] - base_free["r_free"],
-            "gap": (field_free["r_free"] - field_work["r_work"]) - (base_free["r_free"] - base_work["r_work"]),
-        },
-        "baseline_gap": base_free["r_free"] - base_work["r_work"],
-        "field_gap": field_free["r_free"] - field_work["r_work"],
+        "r_work_atomic": r_work_atomic,
+        "r_work_field": r_work_field,
+        "r_free_atomic": r_free_atomic,
+        "r_free_field": r_free_field,
+        "gap_atomic": gap_atomic,
+        "gap_field": gap_field,
+        "delta_r_work": r_work_field - r_work_atomic,
+        "delta_r_free": r_free_field - r_free_atomic,
+        "delta_gap": gap_field - gap_atomic,
+        "primary_criterion_met": bool(r_work_field < r_work_atomic and r_free_field < r_free_atomic),
+        "free_set_kind": (
+            "deposited free flags"
+            if cfg.split.strategy == "existing_free_then_hash"
+            else "deterministic hash holdout, NOT the deposited R-free set"
+        ),
+        "n_free": float(free_fn(z)["n_free"]),
+        "n_work": float(work_fn(z)["n_work"]),
         "lock_config_sha256": lock["config_sha256"],
         "evaluation_index": evaluation_index,
         "one_shot": evaluation_index == 1,
     }
     out.write_text(json.dumps(result, indent=2))
-    entry = record_free_evaluation(cfg, lock, out, result["delta"])
+    entry = record_free_evaluation(
+        cfg, lock, out, {k: result[k] for k in ("delta_r_work", "delta_r_free", "delta_gap")}
+    )
     print(json.dumps({**result, "ledger_entry": entry}, indent=2))
 
 

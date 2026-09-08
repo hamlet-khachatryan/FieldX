@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fieldrefine"
 version = "0.3.0"
-description = "GPU-first Bayesian field refinement of crystallographic electron density"
+description = "Correlated density-field refinement of crystallographic electron density beyond the atomic model manifold"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
-authors = [{name = "Crystal Field Inference contributors"}]
+authors = [{name = "FieldX contributors"}]
 keywords = ["crystallography", "electron-density", "jax", "gemmi", "bayesian-inference"]
 dependencies = [
   "gemmi>=0.7.5,<0.8",
@@ -24,6 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Exactly one accelerator extra per environment. DLS GPU nodes provide CUDA 13
+# through `module load cuda`, so use the cuda13 extra there; cpu is for laptops,
+# login nodes and CI.
 cpu = ["jax>=0.7,<1", "optax>=0.2.5,<1"]
 cuda12 = ["jax[cuda12]>=0.7,<1", "optax>=0.2.5,<1"]
 cuda13 = ["jax[cuda13]>=0.7,<1", "optax>=0.2.5,<1"]
@@ -36,7 +39,6 @@ dev = [
 ]
 
 [project.scripts]
-cfi = "crystal_field.cli:app"
 fieldrefine = "crystal_field.cli:app"
 
 [tool.setuptools.packages.find]
@@ -52,11 +54,12 @@ environments = ["sys_platform != 'Windows'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
-  "integration: lightweight multi-module integration tests",
-  "gpu: requires a JAX accelerator and runs only through SLURM GPU validation",
-  "cluster: expensive end-to-end tests; never run in local CI",
+  "integration: multi-module tests on a small synthetic dataset; safe on CPU",
+  "gpu: requires a JAX accelerator; run only through slurm/40_gpu_tests.sbatch",
+  "cluster: expensive end-to-end tests; never run in CI",
 ]
 
 [tool.ruff]
