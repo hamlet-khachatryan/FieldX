@@ -201,6 +201,9 @@ cannot reach, and it is the object the project exists to find.
 The stage is a leaf: it does not gate the model freeze, and its output is not hashed into
 `MODEL_LOCK.json` because it is re-derivable and makes no claim about held-out data.
 
+Before trusting the first real-data run, read `DECOMPOSITION_FOLLOWUPS.md` — it records the
+known limitations, and in particular which two numbers to sanity-check on that run.
+
 ## The free set
 
 After the freeze job succeeds:
