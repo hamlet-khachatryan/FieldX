@@ -9,6 +9,7 @@ from conftest import write_tiny_model
 
 from crystal_field.analysis.decomposition import (
     capacity_control,
+    correction_from_fit,
     decompose_target,
     run_decomposition,
     solve_normal_equations,
@@ -285,13 +286,35 @@ def test_the_report_carries_both_targets_and_the_control(fitted):
 
 def test_explained_and_unexplained_reconstruct_the_symmetrized_correction(fitted):
     """Per spec section 3, the target is symmetrize(u), not u."""
-    report = run_decomposition(fitted["cfg"])
-    directory = fitted["cfg"].run.output_dir / "decomposition"
+    from crystal_field.inference.runtime import load_problem_arrays
+
+    cfg = fitted["cfg"]
+    report = run_decomposition(cfg)
+    directory = cfg.run.output_dir / "decomposition"
     explained = np.array(gemmi.read_ccp4_map(str(directory / "explained.ccp4")).grid, copy=True)
     unexplained = np.array(gemmi.read_ccp4_map(str(directory / "unexplained.ccp4")).grid, copy=True)
     assert explained.shape == unexplained.shape
     assert np.all(np.isfinite(explained)) and np.all(np.isfinite(unexplained))
     assert report["targets"]["full_correction"]["target_norm"] > 0
+
+    # The name's promise: explained + unexplained reconstructs symmetrize(u) exactly, not
+    # just "some finite grid of the right shape". Rebuild the expected target the same way
+    # run_decomposition does, following the loading pattern the rest of this module and
+    # test_maps.py use (fitted["metadata"] for cell/spacegroup, load_problem_arrays for arrays).
+    metadata = fitted["metadata"]
+    cell = gemmi.UnitCell(*metadata["cell"])
+    spacegroup = gemmi.SpaceGroup(metadata["spacegroup"])
+    arrays = load_problem_arrays(cfg)
+    expected = symmetrize_grid(correction_from_fit(cfg, arrays), cell, spacegroup)
+
+    # explained.ccp4 and unexplained.ccp4 each round-trip through float32 independently
+    # (crystal_field.maps._write casts before writing), so their sum carries float32
+    # rounding on the order of ~1.2e-7 relative to the largest value in the grid. 1e-5 of
+    # the peak magnitude is ~80x that noise floor -- generous enough to absorb it and any
+    # incidental FFT/symmetrization rounding, but 10,000x tighter than would be needed to
+    # let a swapped-map or transposed-axis bug pass.
+    tolerance = 1e-5 * float(np.abs(expected).max())
+    np.testing.assert_allclose(explained + unexplained, expected, atol=tolerance, rtol=0.0)
 
 
 def test_a_missing_fit_is_reported(prepared_dataset):
@@ -300,22 +323,72 @@ def test_a_missing_fit_is_reported(prepared_dataset):
 
 
 def test_the_free_set_does_not_influence_any_reported_number(fitted):
-    """Same discipline as the rest of the pipeline: mutate free, nothing may move."""
+    """`_data_supported_target` reads exactly one field to decide what counts as free:
+    `split`, partitioned as `work = split != 2` (decomposition.py:169-170). It never reads
+    `observation` or `uncertainty`. A test that mutates `observation` on the free rows
+    passes identically against a broken implementation that includes free reflections
+    (e.g. `work = np.ones_like(split, dtype=bool)`), because nothing in this feature ever
+    looks at `observation` -- so this test mutates `split` instead, the field the code
+    actually consumes, with a positive control proving the mutation is observable.
+    """
     cfg = fitted["cfg"]
     baseline = run_decomposition(cfg)
 
     path = cfg.run.data_dir / "reflections.npz"
-    stored = dict(np.load(path))
-    free = stored["split"] == 2
-    assert free.any()
-    stored["observation"][free] *= 1000.0
-    np.savez_compressed(path, **stored)
+    original = dict(np.load(path))
+    baseline_split = original["split"]
+    baseline_n_reflections = baseline["targets"]["data_supported"]["n_reflections"]
+    # Pin the exclusion directly: the reported reflection count is exactly the work count.
+    assert baseline_n_reflections == int((baseline_split != 2).sum())
 
-    mutated = run_decomposition(cfg)
+    # --- Negative half: relabeling WORK reflections between the two WORK codes (train=0,
+    # tune=1) must leave every reported number unchanged, because the feature partitions
+    # only on split != 2 -- neither code is free, so this is invisible to `work`. ---
+    stored = {key: value.copy() for key, value in original.items()}
+    split = stored["split"]
+    work_indices = np.flatnonzero(split != 2)
+    assert work_indices.size > 1
+    relabel = work_indices[: work_indices.size // 2]
+    split[relabel] = np.where(split[relabel] == 0, 1, 0)
+    np.savez_compressed(path, **stored)
+    try:
+        relabeled = run_decomposition(cfg)
+    finally:
+        np.savez_compressed(path, **original)
+
     for name in ("full_correction", "data_supported"):
-        assert mutated["targets"][name]["explained_fraction"] == pytest.approx(
+        assert relabeled["targets"][name]["explained_fraction"] == pytest.approx(
             baseline["targets"][name]["explained_fraction"]
         )
+        assert relabeled["targets"][name]["target_norm"] == pytest.approx(baseline["targets"][name]["target_norm"])
+    assert relabeled["targets"]["data_supported"]["n_reflections"] == baseline_n_reflections
+
+    # --- Positive control: moving WORK reflections to FREE (2) MUST change data_supported,
+    # and must leave full_correction untouched -- it reads no reflections at all. This is
+    # the evidence that the shape of test above can actually fail. ---
+    stored = {key: value.copy() for key, value in original.items()}
+    split = stored["split"]
+    work_indices = np.flatnonzero(split != 2)
+    to_free = work_indices[: work_indices.size // 3]
+    assert to_free.size > 0
+    split[to_free] = 2
+    np.savez_compressed(path, **stored)
+    try:
+        shrunk = run_decomposition(cfg)
+    finally:
+        np.savez_compressed(path, **original)
+
+    shrunk_n_reflections = shrunk["targets"]["data_supported"]["n_reflections"]
+    assert shrunk_n_reflections < baseline_n_reflections
+    assert shrunk["targets"]["data_supported"]["explained_fraction"] != pytest.approx(
+        baseline["targets"]["data_supported"]["explained_fraction"]
+    )
+    assert shrunk["targets"]["full_correction"]["explained_fraction"] == pytest.approx(
+        baseline["targets"]["full_correction"]["explained_fraction"]
+    )
+    assert shrunk["targets"]["full_correction"]["target_norm"] == pytest.approx(
+        baseline["targets"]["full_correction"]["target_norm"]
+    )
 
 
 def test_the_basis_can_be_overridden(fitted):
@@ -344,3 +417,4 @@ def test_a_disabled_decomposition_writes_nothing(fitted):
     disabled = cfg.model_copy(update={"decomposition": cfg.decomposition.model_copy(update={"enabled": False})})
     run_decomposition(disabled)
     assert not (disabled.run.output_dir / "decomposition" / "decomposition.json").exists()
+    assert not (disabled.run.output_dir / "decomposition").exists()
