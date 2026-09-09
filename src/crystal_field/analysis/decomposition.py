@@ -98,3 +98,57 @@ def correction_from_fit(cfg, arrays):
     )
     z = jnp.asarray(np.load(path), dtype=arrays.rho0.dtype)
     return np.asarray(jax.device_get(apply_transfer(z, transfer, arrays.unit_cell_volume)), dtype=np.float64)
+
+
+def decompose_target(basis, target, ridge: float = 0.0) -> dict:
+    """Least-squares projection of a grid-shaped target onto the basis."""
+    flat = np.asarray(target, dtype=np.float64).reshape(-1)
+    if flat.size != basis.matrix.shape[0]:
+        raise ValueError(f"Target has {flat.size} voxels but the basis expects {basis.matrix.shape[0]}")
+
+    gram = np.asarray((basis.matrix.T @ basis.matrix).todense(), dtype=np.float64)
+    rhs = np.asarray(basis.matrix.T @ flat, dtype=np.float64).ravel()
+    result = solve_normal_equations(gram, rhs, float(flat @ flat), ridge=ridge)
+
+    explained = np.asarray(basis.matrix @ result["amplitudes"]).reshape(basis.grid_shape)
+    result["explained"] = explained
+    result["unexplained"] = np.asarray(target, dtype=np.float64) - explained
+    return result
+
+
+def capacity_control(
+    basis, reference_norm, transfer, unit_cell_volume, cell, spacegroup, seed, n_trials, ridge: float = 0.0
+) -> dict:
+    """What the same basis explains of matched random fields.
+
+    An explained fraction on its own says nothing: with thousands of free parameters the
+    basis fits a great deal of anything. Each trial draws a field through the *same*
+    prior operator the fit used, scales it to the correction's norm, symmetrizes it, and
+    decomposes it. If the control scores 0.70, a real score of 0.75 is not a finding.
+    """
+    fractions = []
+    for trial in range(int(n_trials)):
+        rng = np.random.default_rng(int(seed) + 1000 + trial)
+        draw = rng.standard_normal(basis.grid_shape)
+        if transfer is not None:
+            import jax
+            import jax.numpy as jnp
+
+            from crystal_field.model.prior import apply_transfer
+
+            draw = np.asarray(
+                jax.device_get(apply_transfer(jnp.asarray(draw, dtype=transfer.dtype), transfer, unit_cell_volume)),
+                dtype=np.float64,
+            )
+        draw = symmetrize_grid(draw, cell, spacegroup)
+        norm = float(np.linalg.norm(draw))
+        if norm > 0:
+            draw *= float(reference_norm) / norm
+        fractions.append(decompose_target(basis, draw, ridge=ridge)["explained_fraction"])
+
+    return {
+        "fractions": [float(f) for f in fractions],
+        "mean": float(np.mean(fractions)),
+        "sd": float(np.std(fractions)),
+        "n_trials": int(n_trials),
+    }
