@@ -102,4 +102,8 @@ def test_decompose_rejects_a_non_positive_trial_count(tiny_dataset, monkeypatch,
 
     monkeypatch.setattr(decomposition_module, "run_decomposition", fail)
     result = runner.invoke(app, ["decompose", str(tiny_dataset["config_path"]), "--n-trials", value])
-    assert result.exit_code != 0
+    # `exit_code != 0` alone proves nothing: CliRunner catches the monkeypatched raise and
+    # turns it into exit 1, which is indistinguishable from the rejection we want. Demand
+    # click's usage exit code, and demand the analysis was never reached.
+    assert result.exit_code == 2, result.output
+    assert not isinstance(result.exception, AssertionError), "the analysis was reached anyway"

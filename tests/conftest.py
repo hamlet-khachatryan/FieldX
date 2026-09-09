@@ -182,8 +182,15 @@ def prepared_dataset(tiny_dataset):
 
 @pytest.fixture
 def symmetric_prepared_dataset(tmp_path):
-    """`prepared_dataset`'s equivalent in P 21 21 21, where symmetrization does something."""
-    return prepare_dataset(build_dataset(tmp_path, write_symmetric_model, SYMMETRIC_SPACEGROUP))
+    """`prepared_dataset`'s equivalent in P 21 21 21, where symmetrization does something.
+
+    Built under its own subdirectory: `build_dataset` always writes `tiny.pdb`, `tiny.mtz`,
+    `config.yaml` and `run/` at the path it is given, so a test requesting this fixture and
+    `prepared_dataset` together would otherwise have each silently overwrite the other.
+    """
+    directory = tmp_path / "symmetric"
+    directory.mkdir()
+    return prepare_dataset(build_dataset(directory, write_symmetric_model, SYMMETRIC_SPACEGROUP))
 
 
 @pytest.fixture

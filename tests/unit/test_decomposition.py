@@ -293,6 +293,11 @@ def test_the_report_carries_both_targets_and_the_control(fitted):
         control = target["control"]
         assert control["n_trials"] == 2, name
         assert 0.0 <= control["mean"] <= 1.0, name
+        # Spec 6.1 wants n_capacity_trials DISTINCT draws. Without this, a control that
+        # scored one fixed field every trial -- or ignored its argument entirely -- would
+        # still satisfy every other assertion here.
+        assert len(set(control["fractions"])) == control["n_trials"], name
+        assert control["sd"] > 0.0, name
         assert target["explained_above_control"] == pytest.approx(target["explained_fraction"] - control["mean"]), name
     assert report["basis"]["name"] == "coordinates"
     assert report["basis"]["rank"] > 0
@@ -375,12 +380,18 @@ def test_run_decomposition_symmetrizes_in_a_space_group_where_that_matters(symme
     production path changes nothing any of them can see. This one runs the real entry point
     in `P 21 21 21`.
 
-    The latent field is written directly rather than fitted, and deliberately so: the
-    likelihood reaches the grid only through `symmetry_projected_fcalc`, so its gradient is
-    symmetric and a fit starting from z = 0 produces a `u` whose antisymmetric fraction is
-    ~1e-6. A fitted z would leave this test as blind as `P 1` does. `z` is unconstrained in
-    the model, which is exactly why spec section 3 requires the projection at all, so an
-    arbitrary z is the case that has to be covered.
+    The latent field is written directly rather than fitted, and deliberately so: `z` is
+    unconstrained in the model, which is exactly why spec section 3 requires the projection
+    at all, so an arbitrary z is the case that has to be covered.
+
+    How much the projection then does depends on how the fit was started, so neither
+    extreme should be read as "the" antisymmetric fraction. Starting from `z = 0` the
+    likelihood reaches the grid only through `symmetry_projected_fcalc`, `L` commutes with
+    symmetrization, and Adam's element-wise update preserves the symmetric subspace, so the
+    iterate never leaves it and the fraction stays at float32 noise (~1e-6). Under
+    `optimizer.init: random` -- which `config.py` REQUIRES whenever `starting_density: zero`,
+    the empty-field control run -- it is large (~0.9 measured on this fixture). Symmetrizing
+    is near-inert in the first case and load-bearing in the second.
     """
     from crystal_field.inference.runtime import load_problem_arrays
 
@@ -430,7 +441,7 @@ def test_a_missing_fit_is_reported(prepared_dataset):
 
 def test_the_free_set_does_not_influence_any_reported_number(fitted):
     """`_data_supported_target` reads exactly one field to decide what counts as free:
-    `split`, partitioned as `work = split != 2` (decomposition.py:169-170). It never reads
+    `split`, partitioned as `work = split != FREE` (decomposition.py:223). It never reads
     `observation` or `uncertainty`. A test that mutates `observation` on the free rows
     passes identically against a broken implementation that includes free reflections
     (e.g. `work = np.ones_like(split, dtype=bool)`), because nothing in this feature ever
