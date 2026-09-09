@@ -74,6 +74,21 @@ v4 extends it in two directions:
 A v4 configuration is unusable if an elementary coordinate perturbation is expensive
 under `L_res` *and* poorly represented by `Phi`.
 
+## 3a. The tangent decomposition (implemented; gates this design)
+
+`fieldrefine decompose` implements the projection described above as a read-only v3
+analysis. It is **not** v4: the formulation stays `rho = rho0 + L z` and nothing in the
+model, prior or optimizer changes.
+
+It answers whether v4 is worth building. Given a fitted correction, it reports the
+fraction the atomic tangent space explains, the fraction it does not, and what the same
+basis explains of matched random fields. If the real fraction does not exceed its
+capacity control, a mode dictionary would be fitting capacity rather than structure and
+the joint refinement below should not be built.
+
+Specification: `docs/superpowers/specs/2026-09-09-tangent-decomposition-design.md`.
+Outputs: `runs/<ID>/final/decomposition/`.
+
 ## 4. Coherent physical modes
 
 Candidate constructions for `Phi`, in increasing order of commitment:

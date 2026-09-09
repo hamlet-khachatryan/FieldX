@@ -46,6 +46,8 @@ depends on a downloaded reflection file or on a particular PDB entry.
 | `test_sigmaa.py` | figure of merit bounded, monotonic and overflow-safe; centric vs acentric forms; scale recovery; `m` falling for an unrelated model; shells applied across reflection sets |
 | `test_maps.py` | the CCP4 map set: every file written and readable, `field` exactly `refined - rho0`, free reflections excluded, an Fc map reproducing the density it came from (pinning both the phase conjugation and the ASU reduction), and the sigma-A source gate |
 | `test_memory_estimator.py` | grid sources, scaling with grid and mode count, the information budget guard |
+| `test_tangent_basis.py` | density additivity over atoms, per-atom derivative columns, sparsity, symmetry copies, basis column counts, the truncation guard |
+| `test_decomposition.py` | exact least-squares recovery, rank deficiency reported not hidden, symmetrization and the antisymmetric fraction, ground-truth displacement recovery, the control detecting over-parameterisation, artifacts, free-set invariance |
 | `test_cli.py` | login-node commands run without an accelerator |
 | `integration/test_pipeline.py` | prepare → rho0 → mask → scaling → gates → fit → information → freeze → one-shot free evaluation |
 | `integration/test_atomic_representability.py` | coordinate, occupancy, B and anisotropic ADP perturbations; the model is left untouched |

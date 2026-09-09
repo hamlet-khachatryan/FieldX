@@ -202,6 +202,27 @@ unit is passed to the transform since it expands by symmetry. Getting either wro
 the correlation between an Fc map and the density it came from from about 0.87 to 0.12,
 which is what the map test asserts.
 
+## 5g. Tangent decomposition
+
+A read-only diagnostic testing the claim in section 1 directly: is the inferred density
+reachable by ordinary refinement? The correction is projected onto the atomic tangent
+space, spanned by the density derivatives with respect to atomic coordinates and,
+optionally, B factors and occupancies.
+
+Columns are built by central-differencing single-atom Gemmi densities. Density is additive
+over atoms, so a single-atom structure yields the exact column, and Gemmi's density cutoff
+makes each column sparse, which is what makes a few thousand columns affordable.
+
+Two targets are reported: the symmetrized correction on the grid, and its data-supported
+part on the measured work reflections. Only the symmetric component of the correction
+reaches `F_calc`, and every column is symmetric, so the antisymmetric residue is reported
+separately rather than counted as unexplained.
+
+With thousands of free parameters the basis fits a substantial fraction of anything, so
+an explained fraction is never reported alone: matched random fields drawn through the
+same prior operator are decomposed onto the same basis and reported alongside. The
+comparison, not the number, is the result.
+
 ## 6. R factors
 
 For amplitude data the reported R value is

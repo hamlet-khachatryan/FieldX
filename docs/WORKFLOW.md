@@ -70,6 +70,9 @@ Logs land in `<run_root>/logs/`.
 | `selected.selection.json` | 52 | the ranking and the winner |
 | `final/fit/metrics.json` | 60 | work-set fit; `history.csv` for convergence |
 | `final/maps/*.ccp4` | 60 | the map set; read `maps/maps.json` first |
+| `final/decomposition/decomposition.json` | 72 | explained fraction vs its capacity control |
+| `final/decomposition/explained.ccp4` | 72 | the part of the correction the atomic tangent space explains |
+| `final/decomposition/unexplained.ccp4` | 72 | density no atomic parameter can produce |
 | `final/info_spectrum.json` | 70 | eigenvalues, `d_eff` lower bound |
 | `final/MODEL_LOCK.json` | 75 | hashes of everything frozen |
 | `final/FREE_EVALUATION.json` | manual | the one-shot result |
@@ -125,6 +128,26 @@ Where `m` and `D` come from is recorded in `maps.json` under `sigma_a`:
 Check `sigma_a.mean_figure_of_merit` and the per-shell `D`: `D` far from 1 means the
 scaling is off, and `m` near 1 everywhere means either an excellent model or (more often)
 that the weights were estimated on data the model had already fitted.
+
+## Reading the decomposition
+
+Stage 72 asks whether ordinary refinement could have produced what the field inferred.
+
+Read `decomposition.json` in this order:
+
+1. `capacity_control.mean` — what the basis explains of pure noise. This is the floor.
+2. `targets.full_correction.explained_fraction` — the real number.
+3. `verdict.explained_above_control` — the difference. Near zero means the basis is
+   fitting capacity, not structure, and the decomposition has found nothing.
+4. `basis.condition_number` — if very large, the per-parameter breakdown in
+   `amplitude_rms_by_parameter` should not be over-interpreted even when the total holds.
+5. `antisymmetric_fraction` — how much of the correction never reached `F_calc` at all.
+
+Then open `unexplained.ccp4` against the model. That is density the atomic parameters
+cannot reach, and it is the object the project exists to find.
+
+The stage is a leaf: it does not gate the model freeze, and its output is not hashed into
+`MODEL_LOCK.json` because it is re-derivable and makes no claim about held-out data.
 
 ## The free set
 
