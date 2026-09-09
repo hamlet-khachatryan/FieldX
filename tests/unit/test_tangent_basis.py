@@ -175,6 +175,43 @@ def test_residue_rigid_gives_six_columns_per_multi_atom_group(model):
     assert basis.n_columns == 2 * 6 + 1 * 3
 
 
+def test_rigid_translation_matches_the_sum_of_atom_derivatives(model):
+    """A rigid t_x column must equal the sum of the group's per-atom d(rho)/dx columns.
+
+    Catches a sign flip or dropped atom in the translation branch of `_rigid_column`.
+    """
+    basis = _basis(model, "residue_rigid")
+    # ALA 1 is the first (multi-atom, 5-atom) residue_rigid group -- group index 0.
+    group_atoms = [atom for _, atom in selected_atoms(model[0])][:5]
+    label_index = basis.labels.index((0, "t_x"))
+    stored = np.asarray(basis.matrix[:, label_index].todense()).ravel().reshape(SHAPE)
+    expected = np.zeros(SHAPE, dtype=np.float64)
+    for atom in group_atoms:
+        expected += tangent_column(atom, "x", model.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
+    np.testing.assert_allclose(stored, expected, atol=1e-10)
+
+
+def test_rigid_rotation_weights_sum_to_zero_net_translation(model):
+    """A rotation about the group centroid must not translate the group.
+
+    Recomputes the displacement weights `_rigid_column` uses (axis x (r_i - centroid)) and
+    asserts they sum to the zero vector across the group's atoms -- pinning both the
+    centroid placement and the cross-product operand order. This is a property of the
+    weights themselves, not of the resulting density column.
+    """
+    # ALA 1 is the first (multi-atom, 5-atom) residue_rigid group.
+    group_atoms = [atom for _, atom in selected_atoms(model[0])][:5]
+    centroid = np.mean([[atom.pos.x, atom.pos.y, atom.pos.z] for atom in group_atoms], axis=0)
+    for axis_index in range(3):
+        axis = np.zeros(3)
+        axis[axis_index] = 1.0
+        total = np.zeros(3)
+        for atom in group_atoms:
+            position = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
+            total += np.cross(axis, position - centroid)
+        np.testing.assert_allclose(total, np.zeros(3), atol=1e-10)
+
+
 def test_an_unknown_basis_is_rejected(model):
     with pytest.raises(ValueError, match="Unknown basis"):
         _basis(model, "everything")

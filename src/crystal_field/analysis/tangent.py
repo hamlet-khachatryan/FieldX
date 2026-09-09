@@ -137,15 +137,19 @@ def _residue_groups(model):
     return list(groups.values())
 
 
-def _truncate(column, atom, cell, shape, radius):
-    """Zero everything beyond `radius` of the atom, for an explicit truncation test.
+def _truncate(column, centre_pos, cell, shape, radius):
+    """Zero everything beyond `radius` of `centre_pos`, for an explicit truncation test.
+
+    `centre_pos` is a Position (Cartesian Angstrom) -- an atom's own position for the
+    per-atom bases, or a rigid group's centroid for `residue_rigid`, so the truncation box
+    is always centred on the same point the column's derivative was taken about.
 
     Only reachable when box_radius_angstrom is set. The default (None) keeps whatever
     Gemmi's density cutoff produced, which is already sparse.
     """
     if radius is None:
         return column
-    fractional = cell.fractionalize(atom.pos)
+    fractional = cell.fractionalize(centre_pos)
     centre = (fractional.x, fractional.y, fractional.z)
     lengths = (cell.a, cell.b, cell.c)
     # Offset along each axis in Angstrom, wrapped into [-L/2, L/2) for periodicity.
@@ -165,12 +169,12 @@ def build_tangent_basis(
     n_voxels = int(np.prod(shape))
     columns, labels, norm_fractions = [], [], []
 
-    def add(atom, kind, label, vector=None):
+    def add(atom, kind, label, vector=None, centre=None):
         dense = (
             tangent_column(atom, kind, cell, spacegroup, shape, d_min, cutoff, scattering) if vector is None else vector
         )
         full_norm = float(np.linalg.norm(dense))
-        kept = _truncate(dense, atom, cell, shape, truncate_radius)
+        kept = _truncate(dense, centre if centre is not None else atom.pos, cell, shape, truncate_radius)
         kept_norm = float(np.linalg.norm(kept))
         norm_fractions.append(kept_norm / full_norm if full_norm > 0 else 1.0)
         columns.append(csc_matrix(kept.reshape(n_voxels, 1)))
@@ -189,12 +193,14 @@ def build_tangent_basis(
             raise ValueError("No atoms survive the selection (non-hydrogen, occupancy > 0)")
         for index, atoms in enumerate(groups):
             kinds = RIGID_KINDS if len(atoms) > 1 else TRANSLATION_KINDS
+            centroid = _group_centroid(atoms)
             for kind in kinds:
                 add(
                     atoms[0],
                     _rigid_source_kind(kind),
                     (index, kind),
-                    vector=_rigid_column(kind, atoms, cell, spacegroup, shape, d_min, cutoff, scattering),
+                    vector=_rigid_column(kind, atoms, centroid, cell, spacegroup, shape, d_min, cutoff, scattering),
+                    centre=centroid,
                 )
     else:
         raise ValueError(f"Unknown basis: {basis}")
@@ -221,7 +227,17 @@ def _rigid_source_kind(kind):
     return {"t_x": "x", "t_y": "y", "t_z": "z", "r_x": "x", "r_y": "y", "r_z": "z"}[kind]
 
 
-def _rigid_column(kind, atoms, cell, spacegroup, shape, d_min, cutoff, scattering):
+def _group_centroid(atoms):
+    """The centroid Position (Cartesian Angstrom) of a rigid group's atoms.
+
+    Shared by `_rigid_column`'s rotation math and the truncation centre in `build_tangent_basis`,
+    so both agree on where the group is "centred".
+    """
+    coords = np.mean([[a.pos.x, a.pos.y, a.pos.z] for a in atoms], axis=0)
+    return gemmi.Position(*coords)
+
+
+def _rigid_column(kind, atoms, centroid, cell, spacegroup, shape, d_min, cutoff, scattering):
     """A group translation or rotation, as the sum of its atoms' coordinate derivatives.
 
     A rigid translation along an axis moves every atom identically. A rotation about an
@@ -229,7 +245,7 @@ def _rigid_column(kind, atoms, cell, spacegroup, shape, d_min, cutoff, scatterin
     density derivative is that displacement contracted with the atom's coordinate
     derivatives.
     """
-    centroid = np.mean([[a.pos.x, a.pos.y, a.pos.z] for a in atoms], axis=0)
+    centroid_array = np.array([centroid.x, centroid.y, centroid.z])
     axis_index = {"t_x": 0, "t_y": 1, "t_z": 2, "r_x": 0, "r_y": 1, "r_z": 2}[kind]
     total = np.zeros(tuple(int(n) for n in shape), dtype=np.float64)
     for atom in atoms:
@@ -239,7 +255,7 @@ def _rigid_column(kind, atoms, cell, spacegroup, shape, d_min, cutoff, scatterin
         else:
             axis = np.zeros(3)
             axis[axis_index] = 1.0
-            weights = np.cross(axis, np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - centroid)
+            weights = np.cross(axis, np.array([atom.pos.x, atom.pos.y, atom.pos.z]) - centroid_array)
         for component, name in zip(weights, ("x", "y", "z"), strict=True):
             if component == 0.0:
                 continue
