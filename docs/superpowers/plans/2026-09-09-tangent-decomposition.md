@@ -479,7 +479,8 @@ def test_residue_rigid_gives_six_columns_per_multi_atom_group(model):
     basis = _basis(model, "residue_rigid")
     kinds = [kind for _, kind in basis.labels]
     assert set(kinds) <= {"t_x", "t_y", "t_z", "r_x", "r_y", "r_z"}
-    assert basis.n_columns == 3 * 6, "3 residues in the tiny model, all multi-atom"
+    # ALA(5 atoms) + GLY(4) + MET(1): two multi-atom groups x 6, one single-atom x 3.
+    assert basis.n_columns == 2 * 6 + 1 * 3
 
 
 def test_an_unknown_basis_is_rejected(model):
@@ -495,7 +496,7 @@ def test_a_model_with_no_usable_atoms_is_rejected(tmp_path):
         build_tangent_basis(empty[0], empty.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
 ```
 
-Note: the tiny model in `conftest.py` has 10 atoms across 3 residues (ALA 1 with 5 atoms, GLY 2 with 4, MET 3 with 1). MET 3 is single-atom, so `residue_rigid` gives `2 * 6 + 1 * 3 = 15` columns, not 18. **Correct the expected value to 15 and the docstring accordingly when writing the test** — verify by running `python -c` against the fixture before asserting.
+The tiny model in `conftest.py` has 10 atoms across 3 residues: ALA 1 (5 atoms), GLY 2 (4), MET 3 (1). MET 3 is single-atom, so `residue_rigid` gives `2 * 6 + 1 * 3 = 15` columns. Step 2 re-derives this against the fixture rather than trusting the arithmetic.
 
 - [ ] **Step 2: Verify the residue grouping before asserting**
 
@@ -1337,7 +1338,7 @@ Expected: FAIL — `ImportError: cannot import name 'run_decomposition'`.
 Append to `src/crystal_field/analysis/decomposition.py`:
 
 ```python
-def _data_supported_target(cfg, arrays, basis, correction, spacegroup):
+def _data_supported_target(cfg, arrays, basis, correction):
     """Delta_F on the work reflections, decomposed against the columns' structure factors.
 
     Only about one band-limited frequency in seven has a measured reflection behind it
@@ -1426,7 +1427,7 @@ def run_decomposition(cfg, basis: str | None = None, n_trials: int | None = None
     )
 
     full = decompose_target(tangent, symmetric, ridge=cfg.decomposition.ridge)
-    data_supported = _data_supported_target(cfg, arrays, tangent, symmetric, spacegroup)
+    data_supported = _data_supported_target(cfg, arrays, tangent, symmetric)
 
     transfer = build_transfer(
         tuple(arrays.rho0.shape), arrays.reciprocal_metric, arrays.unit_cell_volume,
