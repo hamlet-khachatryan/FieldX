@@ -23,9 +23,31 @@ There is no `pip install --user`, no `python -m venv`, no generated
 `environment/cluster.env`, and no variable that must be exported to find the environment.
 
 ```bash
-uv sync --locked --extra cuda13 --group dev     # GPU cluster
+uv sync --locked --extra cuda12 --group dev     # GPU cluster, compute capability 7.0
+uv sync --locked --extra cuda13 --group dev     # GPU cluster, compute capability 7.5+
 uv sync --locked --extra cpu    --group dev     # laptop, login node, CI
 ```
+
+### Choosing the CUDA extra
+
+Pick it by the GPU's **compute capability**, not by the toolkit `module load cuda`
+provides. CUDA 13 dropped Volta: no CUDA 13 ptxas can build for compute capability 7.0,
+and XLA reports that as `ptxas too old` -- which sends you looking for a newer ptxas that
+does not exist. The toolkit is not too old; the GPU is too old for it.
+
+```bash
+nvidia-smi --query-gpu=name,compute_cap --format=csv
+```
+
+| compute capability | example GPU | extra |
+|---|---|---|
+| 7.0 | V100 | `cuda12` |
+| 7.5 and newer | T4, A100, H100 | `cuda13` |
+
+`slurm/dls/cuda.sh` refuses to continue on a mismatch and names the fix, and
+`scripts/cluster_preflight.sh` checks the installed plugin against the visible GPU. If
+your partitions differ in GPU generation, pin one with
+`CFI_SBATCH_ARGS="--partition=..."` so a rebuild is not needed per job.
 
 Compute jobs use `uv run --frozen --no-sync`, so **dependency resolution never happens
 on a compute node**.
@@ -43,6 +65,26 @@ Disk quota exceeded (os error 122)
 Export uv's own variables *before* the first sync — `FIELDX_UV_CACHE` is only read once
 `slurm/common.sh` has been sourced, so it does not cover a bare `uv sync`:
 
+Set one path and let the repository derive the rest:
+
+```bash
+source scripts/workspace-env.sh /dls/data2temp01/hamlet/workspace
+```
+
+That exports `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `FIELDX_DATA_ROOT`,
+`FIELDX_RUNS_ROOT` and `FIELDX_JAX_CACHE` beneath it, creates them, and prints what it
+chose. Source it **before** the first `uv sync`. Export `FIELDX_WORKSPACE` in your shell
+profile and `slurm/common.sh` will do the same for submitted jobs, so the five paths never
+drift apart. Anything you set yourself is left alone, so pointing one cache at fast local
+scratch still works:
+
+```bash
+export UV_CACHE_DIR=/local/fast/uv-cache          # this survives
+source scripts/workspace-env.sh /dls/.../workspace
+```
+
+To set them individually instead:
+
 ```bash
 export UV_CACHE_DIR=/dls/data2temp01/hamlet/workspace/uv-cache
 export UV_PYTHON_INSTALL_DIR=/dls/data2temp01/hamlet/workspace/uv-python
@@ -58,6 +100,7 @@ filesystem as the repository also lets uv hardlink into `.venv` instead of copyi
 
 | Variable | Effect |
 |---|---|
+| `FIELDX_WORKSPACE` | One path that fills in all five below. `source scripts/workspace-env.sh <path>` |
 | `UV_CACHE_DIR` | uv's package cache. **Set this before the first `uv sync` on a cluster** |
 | `UV_PYTHON_INSTALL_DIR` | Where uv puts managed interpreters |
 | `FIELDX_UV` | Absolute path to a `uv` executable, when uv is neither on `PATH` nor in `.venv/bin` |

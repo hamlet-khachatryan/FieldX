@@ -107,3 +107,20 @@ def test_decompose_rejects_a_non_positive_trial_count(tiny_dataset, monkeypatch,
     # click's usage exit code, and demand the analysis was never reached.
     assert result.exit_code == 2, result.output
     assert not isinstance(result.exception, AssertionError), "the analysis was reached anyway"
+
+
+@pytest.mark.parametrize("command", ["config-check", "inspect"])
+def test_json_output_stays_parseable_when_colour_is_forced(tiny_dataset, monkeypatch, command):
+    """The CLI's stdout is machine-readable: `fieldrefine inspect ... | jq` must work.
+
+    `from rich import print` used to syntax-highlight every json.dumps payload, so any
+    environment with colour enabled (FORCE_COLOR, a tty) emitted ANSI escapes into the
+    JSON and broke every downstream parser. Forcing colour on is what makes this test
+    able to fail -- without it the highlighting is disabled and the bug is invisible.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "3")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    result = runner.invoke(app, [command, str(tiny_dataset["config_path"])])
+    assert result.exit_code == 0, result.output
+    assert "\x1b[" not in result.output, "ANSI escapes leaked into machine-readable output"
+    json.loads(result.output)

@@ -50,10 +50,31 @@ else
   echo "        If compilation fails with 'ptxas too old', set FIELDX_XLA_CUDA_DIR to a toolkit root." >&2
 fi
 
+# The toolkit being found is not the same as the toolkit being usable. CUDA 13 dropped
+# Volta: its ptxas cannot emit code for compute capability 7.0, and XLA reports that as
+# "ptxas too old" -- which sends you hunting for a newer ptxas that does not exist. Catch
+# the real condition here, while the message can still name the fix.
+_fieldx_cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
+if [[ -n "$_fieldx_cc" && -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/ptxas" ]]; then
+  _fieldx_cc_int="${_fieldx_cc/./}"
+  _fieldx_cuda_major="$("$CUDA_HOME/bin/ptxas" --version 2>/dev/null | sed -n 's/.*release \([0-9]*\).*/\1/p' | head -1)"
+  if [[ "$_fieldx_cc_int" =~ ^[0-9]+$ && "$_fieldx_cuda_major" =~ ^[0-9]+$ ]] \
+     && (( _fieldx_cc_int < 75 && _fieldx_cuda_major >= 13 )); then
+    echo "FieldX: FATAL -- this GPU has compute capability $_fieldx_cc, which CUDA $_fieldx_cuda_major does not support." >&2
+    echo "        CUDA 13 removed Volta (7.0). No ptxas from a CUDA 13 toolkit can build for it," >&2
+    echo "        so XLA falls back to the driver and fails with a misleading 'ptxas too old'." >&2
+    echo "        fix: rebuild the environment against CUDA 12:" >&2
+    echo "             rm -rf .venv && uv sync --locked --extra cuda12 --group dev" >&2
+    echo "        or submit to a partition with compute capability 7.5 or newer." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  echo "FieldX: GPU compute capability $_fieldx_cc, CUDA toolkit major $_fieldx_cuda_major" >&2
+fi
+
 # JAX resolves libcupti through LD_LIBRARY_PATH; some module files export CUDA_HOME only.
 for _dir in "${CUDA_HOME:-}/extras/CUPTI/lib64" "${CUDA_HOME:-}/lib64"; do
   [[ -d "$_dir" ]] && export LD_LIBRARY_PATH="$_dir:${LD_LIBRARY_PATH:-}"
 done
-unset _fieldx_cuda_root _tool _path _dir
+unset _fieldx_cuda_root _tool _path _dir _fieldx_cc _fieldx_cc_int _fieldx_cuda_major
 
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true

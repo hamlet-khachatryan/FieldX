@@ -23,6 +23,13 @@ uv run fieldrefine inspect      configs/6o2h/default.yaml
 uv run fieldrefine config-check configs/6o2h/default.yaml
 ```
 
+These four are CPU work and need no accelerator. Run them on a login node; if you are on
+a GPU node and CUDA is not initialised, add `JAX_PLATFORMS=cpu` rather than sourcing the
+CUDA script. Run them from the repository root, too: `init-pdb` resolves its data
+directory from `$FIELDX_DATA_ROOT` or `./data` relative to the working directory, while
+the config it writes is read relative to the repository -- start somewhere else and the
+data lands where the config will not look for it.
+
 `inspect` is the command to read before anything heavy. Check:
 
 - `spacegroup` and `cell` agree between the model and the reflections (`model.cell_consistent`);

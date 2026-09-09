@@ -55,6 +55,16 @@ export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$PROJECT_ROOT/.venv}"
 [[ -z "${FIELDX_UV_CACHE:-}" ]] || export UV_CACHE_DIR="$FIELDX_UV_CACHE"
 [[ -z "${FIELDX_UV_PYTHON_DIR:-}" ]] || export UV_PYTHON_INSTALL_DIR="$FIELDX_UV_PYTHON_DIR"
 
+# One workspace path fills in every location that is not already set. The aliases above
+# run first so an explicit FIELDX_UV_CACHE still wins over the workspace default. Jobs
+# inherit this because submit.sh exports the whole environment (--export=ALL,...).
+if [[ -n "${FIELDX_WORKSPACE:-}" && -f "$PROJECT_ROOT/scripts/workspace-env.sh" ]]; then
+  FIELDX_WORKSPACE_QUIET=1
+  # shellcheck source=../scripts/workspace-env.sh
+  source "$PROJECT_ROOT/scripts/workspace-env.sh"
+  unset FIELDX_WORKSPACE_QUIET
+fi
+
 export PYTHONUNBUFFERED=1
 # Preallocation is OFF by default. Reserving most of the device up front leaves CUDA no
 # room outside the arena to load compiled modules, which fails as

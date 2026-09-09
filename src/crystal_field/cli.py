@@ -12,7 +12,6 @@ from pathlib import Path
 
 import numpy as np
 import typer
-from rich import print
 
 from crystal_field.config import load_config
 

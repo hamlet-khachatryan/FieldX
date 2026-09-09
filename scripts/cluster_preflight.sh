@@ -21,6 +21,7 @@ echo "  host          $(hostname)"
 echo "  project root  $PROJECT_ROOT"
 echo "  uv            $UV"
 echo "  environment   $UV_PROJECT_ENVIRONMENT"
+echo "  workspace     ${FIELDX_WORKSPACE:-<unset; paths set individually>}"
 echo
 
 echo "Environment"
@@ -84,6 +85,29 @@ if command -v sbatch >/dev/null 2>&1; then
 else
   bad "sbatch not found; production jobs cannot be submitted from this host"
 fi
+# The accelerator extra has to match the GPU, not the site's default toolkit. Getting
+# this wrong stays invisible until the first GPU job, where it surfaces as "ptxas too old".
+plugin="$(run_uv python -c 'import importlib.util
+for major in (13, 12):
+    if importlib.util.find_spec(f"jax_cuda{major}_plugin"):
+        print(major); break' 2>/dev/null || true)"
+if [[ -z "$plugin" ]]; then
+  note "no JAX CUDA plugin installed (cpu extra) -- correct for a login node or CI"
+else
+  ok "JAX CUDA plugin: cuda$plugin"
+  cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
+  if [[ -z "$cc" ]]; then
+    note "no GPU visible here, so the cuda$plugin choice cannot be checked from this host"
+    note "verify on a GPU node: nvidia-smi --query-gpu=name,compute_cap --format=csv"
+  elif [[ "${cc/./}" =~ ^[0-9]+$ ]] && (( ${cc/./} < 75 && plugin >= 13 )); then
+    bad "GPU compute capability $cc is not supported by CUDA $plugin (CUDA 13 dropped Volta)"
+    printf '        fix: rm -rf .venv && uv sync --locked --extra cuda12 --group dev\n'
+  else
+    ok "compute capability $cc is supported by cuda$plugin"
+  fi
+fi
+echo
+
 # Honour the same override that fieldx_load_cuda uses, so a non-DLS site pointing
 # FIELDX_CUDA_INIT at its own script is not reported as broken.
 cuda_init="${FIELDX_CUDA_INIT:-$PROJECT_ROOT/slurm/dls/cuda.sh}"

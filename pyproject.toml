@@ -8,7 +8,10 @@ version = "0.3.0"
 description = "Correlated density-field refinement of crystallographic electron density beyond the atomic model manifold"
 readme = "README.md"
 license = {file = "LICENSE"}
-requires-python = ">=3.11"
+# Upper bound is not cosmetic: a clean `uv sync` with no bound picks the newest
+# interpreter it can install, which silently landed a rebuild on 3.14 where the
+# JAX CUDA wheels had no matching build. CI validates 3.11-3.13; allow exactly that.
+requires-python = ">=3.11,<3.14"
 authors = [{name = "FieldX contributors"}]
 keywords = ["crystallography", "electron-density", "jax", "gemmi", "bayesian-inference"]
 dependencies = [
@@ -27,9 +30,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Exactly one accelerator extra per environment. DLS GPU nodes provide CUDA 13
-# through `module load cuda`, so use the cuda13 extra there; cpu is for laptops,
-# login nodes and CI.
+# Exactly one accelerator extra per environment. cpu is for laptops, login nodes and CI.
+#
+# Choose the CUDA extra by the GPU's COMPUTE CAPABILITY, not by the toolkit the site's
+# `module load cuda` happens to provide. CUDA 13 dropped Volta: its ptxas cannot emit
+# code for compute capability 7.0, and the failure surfaces as the misleading
+# "ptxas too old" rather than "this GPU is unsupported".
+#
+#   compute capability 7.0        (V100)              -> cuda12
+#   compute capability 7.5+       (T4, A100, H100...) -> cuda13
+#
+# Check with: nvidia-smi --query-gpu=name,compute_cap --format=csv
 cpu = ["jax>=0.7,<1", "optax>=0.2.5,<1"]
 cuda12 = ["jax[cuda12]>=0.7,<1", "optax>=0.2.5,<1"]
 cuda13 = ["jax[cuda13]>=0.7,<1", "optax>=0.2.5,<1"]
