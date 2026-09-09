@@ -21,17 +21,23 @@ def solve_normal_equations(gram, rhs, target_norm_squared, ridge: float = 0.0) -
     memory at O(n_columns^2) rather than O(n_voxels x n_columns), which is what makes a
     few thousand columns affordable. lstsq is SVD-based, so a rank-deficient basis is
     resolved rather than producing a spurious solution.
+
+    `condition_number` is the condition number of the normal-equations matrix (gram)
+    itself, i.e. approximately the square of the basis Phi's own condition number --
+    this function only ever sees gram, not Phi.
     """
     gram = np.asarray(gram, dtype=np.float64)
     rhs = np.asarray(rhs, dtype=np.float64)
+    data_gram = gram
     if ridge > 0.0:
         gram = gram + ridge * np.eye(gram.shape[0])
 
     amplitudes, _, rank, singular = np.linalg.lstsq(gram, rhs, rcond=None)
 
-    # ||target - Phi a||^2 = ||target||^2 - 2 a.rhs + a.(gram a), expanded so the full
-    # residual vector never has to be formed.
-    residual = float(target_norm_squared) - 2.0 * float(amplitudes @ rhs) + float(amplitudes @ (gram @ amplitudes))
+    # ||target - Phi a||^2 = ||target||^2 - 2 a.rhs + a.(Phi^T Phi a), expanded so the full
+    # residual vector never has to be formed. This must use the ORIGINAL (unridged) gram --
+    # the data residual, not the regularized objective the ridge term nudges the solve towards.
+    residual = float(target_norm_squared) - 2.0 * float(amplitudes @ rhs) + float(amplitudes @ (data_gram @ amplitudes))
     residual = max(residual, 0.0)
     explained = 0.0 if target_norm_squared <= 0 else 1.0 - residual / float(target_norm_squared)
 

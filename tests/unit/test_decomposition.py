@@ -64,3 +64,21 @@ def test_a_zero_target_does_not_divide_by_zero():
     result = solve_normal_equations(basis.T @ basis, np.zeros(basis.shape[1]), 0.0)
     assert np.isfinite(result["explained_fraction"])
     assert result["explained_fraction"] == 0.0
+
+
+def test_ridge_does_not_leak_into_the_reported_residual():
+    """The reported residual and explained_fraction must track the DATA misfit, not the
+    ridge-regularized objective. A ridge penalty inflates ||target - Phi a||^2 by
+    ridge * ||a||^2 if the ridged gram is reused for the residual computation instead of
+    the original one -- that bug is invisible to test_ridge_shrinks_the_amplitudes because
+    it only checks direction, and inflating the residual pushes the fraction in the same
+    direction that ridge is expected to push it anyway.
+    """
+    basis, _, target = _problem(n_rows=50, n_columns=8, seed=1)
+    result = solve_normal_equations(basis.T @ basis, basis.T @ target, float(target @ target), ridge=1.0)
+
+    data_residual = float(np.sum((target - basis @ result["amplitudes"]) ** 2))
+    np.testing.assert_allclose(result["residual_norm_squared"], data_residual, rtol=1e-8, atol=1e-10)
+
+    expected_fraction = 1.0 - data_residual / float(target @ target)
+    np.testing.assert_allclose(result["explained_fraction"], expected_fraction, rtol=1e-8, atol=1e-10)
