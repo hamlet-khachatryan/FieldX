@@ -223,6 +223,11 @@ an explained fraction is never reported alone: matched random fields drawn throu
 same prior operator are decomposed onto the same basis and reported alongside. The
 comparison, not the number, is the result.
 
+Both targets get their own control, computed from the same draws. A control is a property
+of the target as much as of the basis — the grid target and the work-set `Delta_F` target
+have different floors — so neither fraction may be read against the other's control, and
+the report keeps each next to its own.
+
 ## 6. R factors
 
 For amplitude data the reported R value is

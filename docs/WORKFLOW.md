@@ -149,24 +149,51 @@ decomposition:
   basis: coordinates         # coordinates | coordinates_b | full | residue_rigid
   box_radius_angstrom: null  # extra per-column truncation; null keeps Gemmi's own cutoff
   ridge: 0.0                 # Tikhonov damping, for an ill-conditioned basis
-  n_capacity_trials: 8       # matched random fields used to calibrate the control
+  n_capacity_trials: 8       # matched random fields; the same draws calibrate both controls
   write_maps: true           # write explained.ccp4 and unexplained.ccp4
 ```
+
+Setting `box_radius_angstrom` adds `basis.min_norm_fraction` to the report — how much of
+a column's norm survived the truncation, for the worst column. It appears only then. Left
+at `null` each column is stored whole, so the fraction would be 1.0 on every run ever
+made and would tell a reader nothing, which is why it is omitted rather than reported.
 
 A larger basis explains more of anything at all, which is precisely what the capacity
 control is there to measure: widening `basis` raises the control floor along with the
 reported fraction. Compare `explained_above_control` across bases, never
 `explained_fraction` on its own.
 
-Read `decomposition.json` in this order:
+The report holds two independent results, one per target, and **each carries its own
+control**. `full_correction` decomposes the whole symmetrized correction in real space;
+`data_supported` decomposes only the part standing on measured amplitudes — the work-set
+`Delta_F` — which is the number a manuscript would quote. The two controls score the same
+random fields against different targets, so they are not interchangeable and neither
+number may be read against the other's floor.
 
-1. `capacity_control.mean` — what the basis explains of pure noise. This is the floor.
-2. `targets.full_correction.explained_fraction` — the real number.
-3. `verdict.explained_above_control` — the difference. Near zero means the basis is
-   fitting capacity, not structure, and the decomposition has found nothing.
-4. `basis.condition_number` — if very large, the per-parameter breakdown in
-   `amplitude_rms_by_parameter` should not be over-interpreted even when the total holds.
-5. `antisymmetric_fraction` — how much of the correction never reached `F_calc` at all.
+Read `decomposition.json` one target at a time, and for each of
+`targets.full_correction` and `targets.data_supported`:
+
+1. `control.mean` — what the basis explains of pure noise *on this target*. The floor.
+2. `explained_fraction` — the real number.
+3. `explained_above_control` — the difference. Near zero means the basis is fitting
+   capacity, not structure, and the decomposition has found nothing on that target.
+
+Then, once, for the run as a whole:
+
+4. `basis.normal_equations_condition_number` — if very large, the per-parameter breakdown
+   in `amplitude_rms_by_parameter` should not be over-interpreted even when the total
+   holds. Note what this is: the condition number of `Phi^T Phi`, which is approximately
+   `cond(Phi)²`. Take its square root before comparing it against intuition about how
+   well conditioned a basis is, or you will judge it off by a square.
+5. `antisymmetric_norm_fraction` — how much of the correction never reached `F_calc` at
+   all. This is a **norm** ratio, `||u - symmetrize(u)|| / ||u||`, whereas every
+   `explained_fraction` is a **power** ratio, `1 - ||residual||² / ||target||²`. They are
+   not on the same scale: an antisymmetric norm fraction of 0.50 is 25% of the power.
+   Square it before setting the two side by side.
+
+`decomposition.json` carries a `conventions` block stating each of these definitions next
+to the numbers themselves, so a reader who comes to the file without this page is not
+left to guess.
 
 Then open `unexplained.ccp4` against the model. That is density the atomic parameters
 cannot reach, and it is the object the project exists to find.
