@@ -13,6 +13,7 @@ from conftest import write_tiny_model
 
 from crystal_field.analysis.tangent import (
     PARAMETER_STEPS,
+    _residue_groups,
     build_tangent_basis,
     selected_atoms,
     single_atom_model,
@@ -107,11 +108,72 @@ def _basis(model, name, spacegroup="P 1"):
     return build_tangent_basis(model[0], model.cell, gemmi.SpaceGroup(spacegroup), SHAPE, D_MIN, CUTOFF, basis=name)
 
 
-def test_selected_atoms_excludes_hydrogens_and_zero_occupancy(model):
-    atoms = selected_atoms(model[0])
-    assert len(atoms) == 10
+# conftest's TINY_PDB has neither a hydrogen nor a zero-occupancy atom, so asserting
+# against it that the selection excludes both is vacuously true: removing the filter
+# entirely leaves such a test green. Spec section 4.3 requires the exclusion, so it needs
+# a model that actually contains what must be excluded. HOH 3 exists to be dropped whole.
+EXCLUDABLE_PDB = """CRYST1   20.000   24.000   28.000  90.00  90.00  90.00 P 1           1
+ATOM      1  N   ALA A   1       4.000   5.000   6.000  1.00 12.00           N
+ATOM      2  CA  ALA A   1       5.200   5.400   6.300  1.00 11.00           C
+ATOM      3  HA  ALA A   1       5.000   4.600   7.000  1.00 11.00           H
+ATOM      4  CB  ALA A   1       5.000   6.700   7.100  0.00 14.00           C
+ATOM      5  N   GLY A   2      11.000  12.000  13.000  1.00 16.00           N
+ATOM      6  CA  GLY A   2      12.200  12.400  13.300  1.00 15.00           C
+ATOM      7  HA2 GLY A   2      12.400  11.600  14.000  1.00 15.00           H
+ATOM      8  O   HOH A   3      15.000  18.000  20.000  0.00 20.00           O
+ATOM      9  H1  HOH A   3      15.500  18.500  20.500  1.00 20.00           H
+END
+"""
+
+
+@pytest.fixture
+def excludable_model(tmp_path):
+    path = tmp_path / "excludable.pdb"
+    path.write_text(EXCLUDABLE_PDB)
+    structure = gemmi.read_structure(str(path))
+    structure.setup_entities()
+
+    # The PDB above is fixed-column text; if a field slipped a column the exclusions below
+    # would pass for the wrong reason. Pin what gemmi actually parsed.
+    parsed = {(cra.residue.name, cra.atom.name): cra.atom for cra in structure[0].all()}
+    assert len(parsed) == 9
+    assert sum(atom.element.is_hydrogen for atom in parsed.values()) == 3
+    assert sum(atom.occ == 0.0 for atom in parsed.values()) == 2
+    assert parsed[("ALA", "HA")].element.is_hydrogen and parsed[("ALA", "HA")].occ == 1.0
+    assert not parsed[("ALA", "CB")].element.is_hydrogen and parsed[("ALA", "CB")].occ == 0.0
+    return structure
+
+
+def test_selected_atoms_excludes_hydrogens_and_zero_occupancy(excludable_model):
+    """Both rules must actually drop something, and neither may drop anything else."""
+    atoms = selected_atoms(excludable_model[0])
+    kept = {atom.name for _, atom in atoms}
+
+    assert kept == {"N", "CA"}, "one N and one CA per surviving residue, nothing else"
+    assert len(atoms) == 4
+    assert len(atoms) < len(list(excludable_model[0].all())), "the filter must remove something"
     assert all(not atom.element.is_hydrogen for _, atom in atoms)
     assert all(atom.occ > 0 for _, atom in atoms)
+    # Named individually, so a filter that dropped only one of the two rules is caught.
+    assert "HA" not in kept and "HA2" not in kept and "H1" not in kept, "hydrogens must go"
+    assert "CB" not in kept and "O" not in kept, "zero-occupancy atoms must go"
+
+
+def test_residue_groups_apply_the_same_exclusion(excludable_model):
+    """`_residue_groups` carries its own copy of the rule; it needs its own evidence."""
+    groups = _residue_groups(excludable_model[0])
+
+    assert [sorted(atom.name for atom in group) for group in groups] == [["CA", "N"], ["CA", "N"]]
+    # HOH 3 holds nothing but a hydrogen and a zero-occupancy atom, so no group survives it.
+    assert len(groups) == 2, "a residue with no usable atom must not become a rigid group"
+    for group in groups:
+        assert all(not atom.element.is_hydrogen and atom.occ > 0 for atom in group)
+
+
+def test_selected_atoms_keeps_every_atom_of_an_ordinary_model(model):
+    """The exclusions must not be over-eager: TINY_PDB has nothing to drop."""
+    atoms = selected_atoms(model[0])
+    assert len(atoms) == 10 == len(list(model[0].all()))
 
 
 @pytest.mark.parametrize(("name", "per_atom"), [("coordinates", 3), ("coordinates_b", 4), ("full", 5)])
@@ -146,10 +208,21 @@ def test_columns_match_tangent_column_exactly(model):
     np.testing.assert_allclose(stored, expected, atol=1e-10)
 
 
-def test_norm_capture_is_reported(model):
-    """The sparsity guard: stored columns must retain essentially all their norm."""
-    basis = _basis(model, "coordinates")
-    assert basis.min_norm_fraction > 0.999
+def test_norm_capture_is_reported_only_when_truncation_happened(model):
+    """The sparsity guard measures something only when a radius was actually applied.
+
+    Without `truncate_radius`, `_truncate` hands the column straight back, so the fraction
+    compares a column with itself: it is 1.0 for every model, every grid and every basis,
+    and asserting `> 0.999` on it cannot fail. It is therefore not reported at all in that
+    case. With a radius it is a real measurement, and must land inside the guard's band --
+    strictly below 1.0, because a truncation that removed nothing measured nothing either.
+    """
+    assert _basis(model, "coordinates").min_norm_fraction is None
+
+    truncated = build_tangent_basis(
+        model[0], model.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF, basis="coordinates", truncate_radius=2.5
+    )
+    assert 0.999 < truncated.min_norm_fraction < 1.0
 
 
 def test_truncation_below_tolerance_is_refused(model):
@@ -189,28 +262,6 @@ def test_rigid_translation_matches_the_sum_of_atom_derivatives(model):
     for atom in group_atoms:
         expected += tangent_column(atom, "x", model.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
     np.testing.assert_allclose(stored, expected, atol=1e-10)
-
-
-def test_rigid_rotation_weights_sum_to_zero_net_translation(model):
-    """The rotation-weight identity sum_i (axis x (r_i - centroid)) == 0 holds for any centroid.
-
-    This is a mathematical identity of the mean, true for `cross(axis, d)` and equally for
-    `cross(d, axis)` -- it does NOT pin the cross-product operand order (a bug there would
-    still pass). It is kept only as a cheap, independent check that the centroid used here
-    is in fact the mean position; the operand order and overall rotation math are covered
-    separately by `test_rigid_rotation_column_matches_the_explicit_cross_product`.
-    """
-    # ALA 1 is the first (multi-atom, 5-atom) residue_rigid group.
-    group_atoms = [atom for _, atom in selected_atoms(model[0])][:5]
-    centroid = np.mean([[atom.pos.x, atom.pos.y, atom.pos.z] for atom in group_atoms], axis=0)
-    for axis_index in range(3):
-        axis = np.zeros(3)
-        axis[axis_index] = 1.0
-        total = np.zeros(3)
-        for atom in group_atoms:
-            position = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
-            total += np.cross(axis, position - centroid)
-        np.testing.assert_allclose(total, np.zeros(3), atol=1e-10)
 
 
 def test_rigid_rotation_column_matches_the_explicit_cross_product(model):

@@ -48,7 +48,15 @@ NO_FREE_SET_OPTION = typer.Option(
 DECOMPOSE_BASIS_OPTION = typer.Option(
     None, "--basis", help="Override decomposition.basis: coordinates, coordinates_b, full or residue_rigid."
 )
-DECOMPOSE_TRIALS_OPTION = typer.Option(None, "--n-trials", help="Override decomposition.n_capacity_trials.")
+DECOMPOSE_TRIALS_OPTION = typer.Option(
+    None,
+    "--n-trials",
+    # The same `ge=1` the configuration enforces. Without it `--n-trials 0` falls through
+    # the `or` in run_decomposition to the configured default, and a negative value makes
+    # the control a mean over no trials -- NaN, which json.dumps writes as bare `NaN`.
+    min=1,
+    help="Override decomposition.n_capacity_trials (at least 1).",
+)
 
 
 def _cfg(path):

@@ -14,6 +14,32 @@ from __future__ import annotations
 import gemmi
 import numpy as np
 
+from crystal_field.crystallography.io import FREE
+
+# How every number in decomposition.json is defined. These live next to the numbers in the
+# report because the two fractions it carries are ratios of different quantities: mistaking
+# a norm ratio for a power ratio misreads the result by a square.
+CONVENTIONS = {
+    "explained_fraction": (
+        "POWER ratio: 1 - ||target - Phi a||^2 / ||target||^2. Compare it only against the "
+        "control stored beside it, never against a fraction computed on a different target."
+    ),
+    "antisymmetric_norm_fraction": (
+        "NORM ratio: ||u - symmetrize(u)|| / ||u||. Square it before comparing with any "
+        "explained_fraction, which is a power ratio: 0.50 of the norm is 0.25 of the power."
+    ),
+    "normal_equations_condition_number": (
+        "cond(Phi^T Phi), which is approximately cond(Phi)^2 -- the decomposition only ever "
+        "forms the normal equations, never Phi itself. Take its square root before comparing "
+        "against intuition about a basis's own conditioning."
+    ),
+    "min_norm_fraction": (
+        "Reported only when decomposition.box_radius_angstrom truncates the columns. Without "
+        "truncation every column is stored whole, so the fraction would be 1.0 by construction "
+        "and would measure nothing."
+    ),
+}
+
 
 def solve_normal_equations(gram, rhs, target_norm_squared, ridge: float = 0.0) -> dict:
     """Least squares from precomputed normal equations.
@@ -116,17 +142,17 @@ def decompose_target(basis, target, ridge: float = 0.0) -> dict:
     return result
 
 
-def capacity_control(
-    basis, reference_norm, transfer, unit_cell_volume, cell, spacegroup, seed, n_trials, ridge: float = 0.0
-) -> dict:
-    """What the same basis explains of matched random fields.
+def matched_random_fields(basis, reference_norm, transfer, unit_cell_volume, cell, spacegroup, seed, n_trials):
+    """Generate the matched random fields every capacity control is scored on.
 
-    An explained fraction on its own says nothing: with thousands of free parameters the
-    basis fits a great deal of anything. Each trial draws a field through the *same*
-    prior operator the fit used, scales it to the correction's norm, symmetrizes it, and
-    decomposes it. If the control scores 0.70, a real score of 0.75 is not a finding.
+    Each trial draws a field through the *same* prior operator the fit used, scales it to
+    the correction's norm and symmetrizes it. `n_trials` must be `n_trials` DISTINCT draws
+    -- the trial index enters the seed -- or the control collapses to a single field and
+    its spread stops being a measurement.
+
+    This is a generator, not a list: the fields are large and both controls need the same
+    sequence, so each consumer re-derives it from the seed rather than holding all of them.
     """
-    fractions = []
     for trial in range(int(n_trials)):
         rng = np.random.default_rng(int(seed) + 1000 + trial)
         draw = rng.standard_normal(basis.grid_shape)
@@ -144,29 +170,57 @@ def capacity_control(
         norm = float(np.linalg.norm(draw))
         if norm > 0:
             draw *= float(reference_norm) / norm
-        fractions.append(decompose_target(basis, draw, ridge=ridge)["explained_fraction"])
+        yield draw
 
+
+def summarise_control(fractions) -> dict:
+    """The control's summary: every trial's fraction, its mean and its spread."""
+    fractions = [float(f) for f in fractions]
     return {
-        "fractions": [float(f) for f in fractions],
+        "fractions": fractions,
         "mean": float(np.mean(fractions)),
         "sd": float(np.std(fractions)),
-        "n_trials": int(n_trials),
+        "n_trials": len(fractions),
     }
 
 
-def _data_supported_target(cfg, arrays, basis, correction):
+def capacity_control(
+    basis, reference_norm, transfer, unit_cell_volume, cell, spacegroup, seed, n_trials, ridge: float = 0.0
+) -> dict:
+    """What the same basis explains of matched random fields, in real space.
+
+    An explained fraction on its own says nothing: with thousands of free parameters the
+    basis fits a great deal of anything. If the control scores 0.70, a real score of 0.75
+    is not a finding.
+    """
+    return summarise_control(
+        decompose_target(basis, draw, ridge=ridge)["explained_fraction"]
+        for draw in matched_random_fields(
+            basis, reference_norm, transfer, unit_cell_volume, cell, spacegroup, seed, n_trials
+        )
+    )
+
+
+def _data_supported_target(cfg, arrays, basis, correction, control_fields=None):
     """Delta_F on the work reflections, decomposed against the columns' structure factors.
 
     Only about one band-limited frequency in seven has a measured reflection behind it
     for a typical dataset; the rest of the correction is prior interpolation. This target
     isolates the part the data actually supports.
+
+    `control_fields` is the same sequence of matched random fields the real-space control
+    uses. Spec section 11: no explained fraction may be reported without its own control,
+    and the real-space control does not stand in for this one -- it scores a different
+    target. Routing the fields through here is nearly free: the columns' structure factors
+    are already computed for the real target and are reused unchanged, so each extra trial
+    costs one FFT and one solve rather than another `n_columns` FFTs.
     """
     import jax
     import jax.numpy as jnp
 
     from crystal_field.forward.diffraction import fft_structure_factor_grid, symmetry_projected_fcalc
 
-    work = np.asarray(jax.device_get(arrays.split)) != 2
+    work = np.asarray(jax.device_get(arrays.split)) != FREE
     hkls = jnp.asarray(np.asarray(jax.device_get(arrays.hkls))[work], dtype=jnp.int32)
 
     def structure_factors(grid):
@@ -192,14 +246,28 @@ def _data_supported_target(cfg, arrays, basis, correction):
     gram = np.real(stacked.conj().T @ stacked)
     rhs = np.real(stacked.conj().T @ delta_f)
 
+    def explained_fraction_of(grid):
+        values = structure_factors(grid)
+        return solve_normal_equations(
+            gram,
+            np.real(stacked.conj().T @ values),
+            float(np.real(values.conj() @ values)),
+            ridge=cfg.decomposition.ridge,
+        )["explained_fraction"]
+
     result = solve_normal_equations(gram, rhs, float(np.real(delta_f.conj() @ delta_f)), ridge=cfg.decomposition.ridge)
-    return {
+    report = {
         "explained_fraction": result["explained_fraction"],
         "rank": result["rank"],
-        "condition_number": result["condition_number"],
+        "normal_equations_condition_number": result["condition_number"],
         "n_reflections": int(work.sum()),
         "target_norm": float(np.linalg.norm(delta_f)),
     }
+    if control_fields is not None:
+        control = summarise_control(explained_fraction_of(field) for field in control_fields)
+        report["control"] = control
+        report["explained_above_control"] = result["explained_fraction"] - control["mean"]
+    return report
 
 
 def run_decomposition(cfg, basis: str | None = None, n_trials: int | None = None) -> dict:
@@ -243,9 +311,6 @@ def run_decomposition(cfg, basis: str | None = None, n_trials: int | None = None
         truncate_radius=cfg.decomposition.box_radius_angstrom,
     )
 
-    full = decompose_target(tangent, symmetric, ridge=cfg.decomposition.ridge)
-    data_supported = _data_supported_target(cfg, arrays, tangent, symmetric)
-
     transfer = build_transfer(
         tuple(arrays.rho0.shape),
         arrays.reciprocal_metric,
@@ -254,16 +319,23 @@ def run_decomposition(cfg, basis: str | None = None, n_trials: int | None = None
         cfg.prior,
         arrays.rho0.dtype,
     )
-    control = capacity_control(
-        tangent,
-        float(np.linalg.norm(symmetric)),
-        transfer,
-        arrays.unit_cell_volume,
-        cell,
-        spacegroup,
-        cfg.run.seed,
-        n_trials or cfg.decomposition.n_capacity_trials,
-        ridge=cfg.decomposition.ridge,
+    # One sequence of matched random fields, scored against both targets. Every reported
+    # explained fraction gets a control computed on its own target (spec section 11).
+    control_arguments = {
+        "basis": tangent,
+        "reference_norm": float(np.linalg.norm(symmetric)),
+        "transfer": transfer,
+        "unit_cell_volume": arrays.unit_cell_volume,
+        "cell": cell,
+        "spacegroup": spacegroup,
+        "seed": cfg.run.seed,
+        "n_trials": n_trials or cfg.decomposition.n_capacity_trials,
+    }
+
+    full = decompose_target(tangent, symmetric, ridge=cfg.decomposition.ridge)
+    control = capacity_control(**control_arguments, ridge=cfg.decomposition.ridge)
+    data_supported = _data_supported_target(
+        cfg, arrays, tangent, symmetric, control_fields=matched_random_fields(**control_arguments)
     )
 
     out = cfg.run.output_dir / "decomposition"
@@ -276,35 +348,44 @@ def run_decomposition(cfg, basis: str | None = None, n_trials: int | None = None
     for (_, kind), amplitude in zip(tangent.labels, full["amplitudes"], strict=True):
         by_kind.setdefault(kind, []).append(float(amplitude))
 
+    basis_report = {
+        "name": basis_name,
+        "n_columns": tangent.n_columns,
+        "rank": full["rank"],
+        "normal_equations_condition_number": full["condition_number"],
+    }
+    if tangent.min_norm_fraction is not None:
+        # Only meaningful under explicit truncation; without it the column is stored whole
+        # and the fraction is 1.0 by construction, so the key is omitted rather than
+        # inviting a reader to draw a conclusion from a number that cannot vary.
+        basis_report["min_norm_fraction"] = tangent.min_norm_fraction
+
     report = {
         "enabled": True,
-        "basis": {
-            "name": basis_name,
-            "n_columns": tangent.n_columns,
-            "rank": full["rank"],
-            "condition_number": full["condition_number"],
-            "min_norm_fraction": tangent.min_norm_fraction,
-        },
+        "basis": basis_report,
         "starting_density": cfg.baseline.starting_density,
-        "antisymmetric_fraction": antisymmetric_fraction,
+        "antisymmetric_norm_fraction": antisymmetric_fraction,
         "targets": {
             "full_correction": {
                 "explained_fraction": full["explained_fraction"],
                 "target_norm": float(np.linalg.norm(symmetric)),
                 "n_voxels": int(symmetric.size),
+                "control": control,
+                "explained_above_control": full["explained_fraction"] - control["mean"],
             },
             "data_supported": data_supported,
         },
         "amplitude_rms_by_parameter": {
             kind: float(np.sqrt(np.mean(np.square(values)))) for kind, values in by_kind.items()
         },
-        "capacity_control": control,
+        "conventions": CONVENTIONS,
         "verdict": {
-            "explained_above_control": full["explained_fraction"] - control["mean"],
             "note": (
-                "An explained fraction is only meaningful against its control. A real "
-                "score close to the control's mean means the basis is fitting capacity, "
-                "not structure."
+                "An explained fraction is only meaningful against the control stored beside "
+                "it, and the difference is reported there as explained_above_control. The "
+                "two controls are not interchangeable: they score the same random fields "
+                "against different targets. A fraction close to its own control's mean means "
+                "the basis is fitting capacity, not structure."
             ),
         },
         "note": (

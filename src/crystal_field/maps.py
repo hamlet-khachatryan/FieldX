@@ -23,7 +23,7 @@ import json
 import gemmi
 import numpy as np
 
-WORK = 2  # split id of the free set; work is everything else
+from crystal_field.crystallography.io import FREE
 
 
 def _write(array, path, cell, spacegroup):
@@ -89,7 +89,7 @@ def _stats(array):
 def _sigmaa_reflection_set(cfg, sigmaa_from, split):
     """Which reflections may be used to estimate sigma-A, and whether that is allowed."""
     if sigmaa_from == "work":
-        return split != WORK, "work reflections (biased: the model was fitted to them)"
+        return split != FREE, "work reflections (biased: the model was fitted to them)"
     if sigmaa_from != "free":
         raise ValueError(f"sigma_a_from must be 'work' or 'free', not {sigmaa_from!r}")
 
@@ -102,7 +102,7 @@ def _sigmaa_reflection_set(cfg, sigmaa_from, split):
             "held-out reflections on interpretation. Run `fieldrefine evaluate-free` first, "
             "or use the default sigma_a_from='work'."
         )
-    return split == WORK, "free reflections (unbiased; the free set was already spent)"
+    return split == FREE, "free reflections (unbiased; the free set was already spent)"
 
 
 def export_maps(cfg, sigma_a_from: str = "work", n_bins: int = 20) -> dict:
@@ -133,7 +133,7 @@ def export_maps(cfg, sigma_a_from: str = "work", n_bins: int = 20) -> dict:
     field = np.asarray(jax.device_get(correction(z)), dtype=np.float32)
     refined = rho0 + field
 
-    work = np.asarray(jax.device_get(arrays.split)) != WORK
+    work = np.asarray(jax.device_get(arrays.split)) != FREE
     hkls = np.asarray(jax.device_get(arrays.hkls))[work]
     fobs = np.asarray(jax.device_get(arrays.observation), dtype=np.float64)[work]
 
@@ -252,10 +252,13 @@ def export_maps(cfg, sigma_a_from: str = "work", n_bins: int = 20) -> dict:
             "mFoDFc_field.ccp4": "sigma-A weighted difference map with FieldX phases",
             "mFoDFc_atomic.ccp4": "sigma-A weighted difference map with atomic-model phases",
         },
+        # Relative to this manifest's own directory, exactly like every key in "maps" --
+        # `decomposition/` is a sibling of `maps/`, not a child of it, so the "../" is load
+        # bearing: without it these resolve to a path that never exists.
         "related": {
-            "decomposition/explained.ccp4": "written by `fieldrefine decompose`: the part of the "
+            "../decomposition/explained.ccp4": "written by `fieldrefine decompose`: the part of the "
             "correction the atomic tangent space explains",
-            "decomposition/unexplained.ccp4": "written by `fieldrefine decompose`: the part it does not",
+            "../decomposition/unexplained.ccp4": "written by `fieldrefine decompose`: the part it does not",
         },
         "statistics": written,
         "note": (

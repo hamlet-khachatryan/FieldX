@@ -29,9 +29,29 @@ CELL = (20.0, 24.0, 28.0, 90.0, 90.0, 90.0)
 SPACEGROUP = "P 1"
 D_MIN = 2.6
 
+# A space group whose symmetry operations are not the identity. In `P 1` every
+# symmetrization is a no-op, which makes it impossible to tell from a passing test whether
+# the production code symmetrized at all. TINY_PDB and SPACEGROUP are pinned by dozens of
+# tests and must not change, so this is a companion rather than a replacement.
+SYMMETRIC_SPACEGROUP = "P 21 21 21"
+
+
+def _cryst1(spacegroup, z_value):
+    a, b, c, alpha, beta, gamma = CELL
+    return f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}{alpha:7.2f}{beta:7.2f}{gamma:7.2f} {spacegroup:<11}{z_value:>4}"
+
+
+SYMMETRIC_PDB = "\n".join([_cryst1(SYMMETRIC_SPACEGROUP, 4), *TINY_PDB.splitlines()[1:]]) + "\n"
+
 
 def write_tiny_model(path):
     path.write_text(TINY_PDB)
+    return path
+
+
+def write_symmetric_model(path):
+    """The same atoms as `write_tiny_model`, declared in P 21 21 21."""
+    path.write_text(SYMMETRIC_PDB)
     return path
 
 
@@ -113,14 +133,13 @@ def config_payload(tmp_path, model, reflections, **overrides):
     return payload
 
 
-@pytest.fixture
-def tiny_dataset(tmp_path):
+def build_dataset(tmp_path, write_model=write_tiny_model, spacegroup=SPACEGROUP):
     """A complete synthetic dataset: model, MTZ and a validated configuration."""
     from crystal_field.config import AppConfig, resolve_payload_paths
 
-    model = write_tiny_model(tmp_path / "tiny.pdb")
+    model = write_model(tmp_path / "tiny.pdb")
     hkls, observed, sigma, free = synthetic_reflections(model)
-    mtz = write_mtz(tmp_path / "tiny.mtz", hkls, observed, sigma, free)
+    mtz = write_mtz(tmp_path / "tiny.mtz", hkls, observed, sigma, free, spacegroup=spacegroup)
     payload = config_payload(tmp_path, model, mtz)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False))
@@ -136,18 +155,35 @@ def tiny_dataset(tmp_path):
     }
 
 
-@pytest.fixture
-def prepared_dataset(tiny_dataset):
-    """`tiny_dataset` after prepare + rho0 + solvent mask + train scaling."""
+def prepare_dataset(dataset):
+    """A dataset from `build_dataset` after prepare + rho0 + solvent mask + train scaling."""
     from crystal_field.crystallography.io import make_model_density, make_solvent_mask, prepare_reflections
     from crystal_field.crystallography.scaling import fit_baseline_scaling
 
-    cfg = tiny_dataset["cfg"]
-    tiny_dataset["metadata"] = prepare_reflections(cfg)
-    tiny_dataset["rho0_stats"] = make_model_density(cfg)
-    tiny_dataset["mask_stats"] = make_solvent_mask(cfg)
-    tiny_dataset["scaling"] = fit_baseline_scaling(cfg)
-    return tiny_dataset
+    cfg = dataset["cfg"]
+    dataset["metadata"] = prepare_reflections(cfg)
+    dataset["rho0_stats"] = make_model_density(cfg)
+    dataset["mask_stats"] = make_solvent_mask(cfg)
+    dataset["scaling"] = fit_baseline_scaling(cfg)
+    return dataset
+
+
+@pytest.fixture
+def tiny_dataset(tmp_path):
+    """A complete synthetic dataset: model, MTZ and a validated configuration."""
+    return build_dataset(tmp_path)
+
+
+@pytest.fixture
+def prepared_dataset(tiny_dataset):
+    """`tiny_dataset` after prepare + rho0 + solvent mask + train scaling."""
+    return prepare_dataset(tiny_dataset)
+
+
+@pytest.fixture
+def symmetric_prepared_dataset(tmp_path):
+    """`prepared_dataset`'s equivalent in P 21 21 21, where symmetrization does something."""
+    return prepare_dataset(build_dataset(tmp_path, write_symmetric_model, SYMMETRIC_SPACEGROUP))
 
 
 @pytest.fixture

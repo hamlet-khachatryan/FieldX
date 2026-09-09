@@ -117,7 +117,9 @@ class TangentBasis:
     grid_shape: tuple
     basis: str
     n_columns: int
-    min_norm_fraction: float
+    # None when no explicit truncation was requested: `_truncate` then returns the column
+    # unchanged, so the fraction would compare a column with itself and measure nothing.
+    min_norm_fraction: float | None
 
 
 def selected_atoms(model):
@@ -205,8 +207,11 @@ def build_tangent_basis(
     else:
         raise ValueError(f"Unknown basis: {basis}")
 
-    minimum = float(min(norm_fractions))
-    if minimum < MIN_NORM_FRACTION:
+    # Without truncation `_truncate` hands the column back untouched, so every fraction is
+    # 1.0 by construction: reporting it would put a number in the record that cannot vary
+    # and cannot fail the guard. It is a measurement only when a radius was actually applied.
+    minimum = float(min(norm_fractions)) if truncate_radius is not None else None
+    if minimum is not None and minimum < MIN_NORM_FRACTION:
         raise ValueError(
             f"Truncation keeps only {minimum:.4%} of a column's norm, below "
             f"{MIN_NORM_FRACTION:.1%}. Raise box_radius_angstrom or leave it null."

@@ -103,6 +103,31 @@ def test_the_manifest_records_provenance(fitted):
     assert "sigma-A" in written["weighting"], "the absence of weighting must be stated"
 
 
+def test_related_paths_resolve_against_the_manifest_directory(fitted):
+    """Every key in the manifest is a path relative to maps.json's own directory.
+
+    `related` points at another stage's output, and `decomposition/` is a SIBLING of
+    `maps/`, not a child: a key written without the `../` resolves to
+    `final/maps/decomposition/...`, a path that never exists on any run. The check is
+    performed the way a reader would -- join the key to the manifest's directory and open
+    the file -- with a real decomposition on disk to resolve against.
+    """
+    from crystal_field.analysis.decomposition import run_decomposition
+
+    cfg = fitted["cfg"]
+    cfg = cfg.model_copy(update={"decomposition": cfg.decomposition.model_copy(update={"n_capacity_trials": 1})})
+    run_decomposition(cfg)
+    manifest = export_maps(cfg)
+
+    directory = cfg.run.output_dir / "maps"
+    assert manifest["related"], "the cross-reference must not be empty"
+    for key in manifest["related"]:
+        resolved = (directory / key).resolve()
+        assert resolved.is_file(), f"{key} resolves to {resolved}, which does not exist"
+    for key in manifest["maps"]:
+        assert (directory / key).resolve().is_file(), key
+
+
 def test_refinement_flattens_the_difference_map(fitted):
     """Fo-Fc with the fitted phases should be flatter than with the atomic ones."""
     manifest = export_maps(fitted["cfg"])

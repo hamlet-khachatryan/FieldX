@@ -238,7 +238,14 @@ def test_capacity_trials_are_seeded_and_reproducible(tiny_basis):
     assert first["fractions"] == second["fractions"]
     assert first["n_trials"] == 3
     assert 0.0 <= first["mean"] <= 1.0
-    assert first["sd"] >= 0.0
+
+    # Reproducible is only half of the requirement. Spec section 6.1 asks for n_trials
+    # DISTINCT draws: a control that draws the same field every time is perfectly
+    # reproducible, reports sd == 0, and measures nothing. Dropping the trial index from
+    # the seed produces exactly that, so the distinctness is asserted directly rather than
+    # through `sd >= 0`, which no implementation can fail.
+    assert len(set(first["fractions"])) == 3, "each trial must be a distinct draw"
+    assert first["sd"] > 0.0
 
 
 @pytest.fixture
@@ -272,16 +279,47 @@ def test_all_artifacts_are_written(fitted):
 
 
 def test_the_report_carries_both_targets_and_the_control(fitted):
+    """Spec section 11: no explained fraction may be quoted without its own control.
+
+    The bound `0 <= explained_fraction <= 1` is deliberately NOT asserted here:
+    `solve_normal_equations` ends with `np.clip(explained, 0.0, 1.0)`, so the code under
+    test enforces it and the assertion could not fail whatever the decomposition did.
+    """
     report = run_decomposition(fitted["cfg"])
     assert set(report["targets"]) == {"full_correction", "data_supported"}
-    for target in report["targets"].values():
-        assert 0.0 <= target["explained_fraction"] <= 1.0
-    control = report["capacity_control"]
-    assert control["n_trials"] == 2
-    assert 0.0 <= control["mean"] <= 1.0
+    # Every target carries its own control, computed on that target -- the full-correction
+    # control does not stand in for the data-supported one.
+    for name, target in report["targets"].items():
+        control = target["control"]
+        assert control["n_trials"] == 2, name
+        assert 0.0 <= control["mean"] <= 1.0, name
+        assert target["explained_above_control"] == pytest.approx(target["explained_fraction"] - control["mean"]), name
     assert report["basis"]["name"] == "coordinates"
     assert report["basis"]["rank"] > 0
-    assert "antisymmetric_fraction" in report
+    assert "antisymmetric_norm_fraction" in report
+    # The two controls score different targets, so they must not be the same numbers.
+    assert (
+        report["targets"]["data_supported"]["control"]["fractions"]
+        != report["targets"]["full_correction"]["control"]["fractions"]
+    )
+
+
+def test_no_truncation_means_no_norm_fraction_is_reported(fitted):
+    """`box_radius_angstrom` defaults to null, and then `min_norm_fraction` is vacuous.
+
+    `_truncate` returns the column unchanged when no radius is given, so the fraction would
+    compare a column with itself and be 1.0 for every run ever made. A reader told to read
+    this report must not find a number there that cannot vary.
+    """
+    cfg = fitted["cfg"]
+    assert cfg.decomposition.box_radius_angstrom is None
+    assert "min_norm_fraction" not in run_decomposition(cfg)["basis"]
+
+    truncated = cfg.model_copy(
+        update={"decomposition": cfg.decomposition.model_copy(update={"box_radius_angstrom": 2.5})}
+    )
+    report = run_decomposition(truncated)
+    assert 0.999 <= report["basis"]["min_norm_fraction"] < 1.0
 
 
 def test_explained_and_unexplained_reconstruct_the_symmetrized_correction(fitted):
@@ -315,6 +353,74 @@ def test_explained_and_unexplained_reconstruct_the_symmetrized_correction(fitted
     # let a swapped-map or transposed-axis bug pass.
     tolerance = 1e-5 * float(np.abs(expected).max())
     np.testing.assert_allclose(explained + unexplained, expected, atol=tolerance, rtol=0.0)
+
+    # The reconstruction above is, on its own, an algebraic identity: production sets
+    # `unexplained = target - explained`, so `explained + unexplained == target` holds for
+    # ANY `explained` whatsoever -- scale `explained` by two and it still passes. These two
+    # maps are the stage's primary scientific deliverable, so they are also tied to the
+    # scalar the report quotes: the unexplained map must carry exactly the residual power
+    # that `explained_fraction` claims is left over. That pins the CONTENT of `explained`,
+    # not just its arithmetic relationship to `unexplained`.
+    residual_fraction = float(np.sum(unexplained**2) / np.sum(expected**2))
+    assert 1.0 - residual_fraction == pytest.approx(
+        report["targets"]["full_correction"]["explained_fraction"], abs=1e-6
+    )
+
+
+def test_run_decomposition_symmetrizes_in_a_space_group_where_that_matters(symmetric_prepared_dataset):
+    """Spec section 3: the symmetrization is "not optional". This is where that is proved.
+
+    Every other `run_decomposition` test derives from `tiny_dataset`, whose space group is
+    `P 1` -- there `symmetrize_avg` is the identity, so deleting the symmetrization from the
+    production path changes nothing any of them can see. This one runs the real entry point
+    in `P 21 21 21`.
+
+    The latent field is written directly rather than fitted, and deliberately so: the
+    likelihood reaches the grid only through `symmetry_projected_fcalc`, so its gradient is
+    symmetric and a fit starting from z = 0 produces a `u` whose antisymmetric fraction is
+    ~1e-6. A fitted z would leave this test as blind as `P 1` does. `z` is unconstrained in
+    the model, which is exactly why spec section 3 requires the projection at all, so an
+    arbitrary z is the case that has to be covered.
+    """
+    from crystal_field.inference.runtime import load_problem_arrays
+
+    dataset = symmetric_prepared_dataset
+    cfg = dataset["cfg"]
+    cfg = cfg.model_copy(update={"decomposition": cfg.decomposition.model_copy(update={"n_capacity_trials": 2})})
+
+    metadata = dataset["metadata"]
+    cell = gemmi.UnitCell(*metadata["cell"])
+    spacegroup = gemmi.SpaceGroup(metadata["spacegroup"])
+    assert len(spacegroup.operations()) > 1, "the fixture must have real symmetry to test"
+
+    fit_directory = cfg.run.output_dir / "fit"
+    fit_directory.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(19)
+    np.save(fit_directory / "z_map.npy", rng.standard_normal(tuple(metadata["grid_shape"])).astype(np.float32))
+
+    arrays = load_problem_arrays(cfg)
+    correction = correction_from_fit(cfg, arrays)
+    symmetric = symmetrize_grid(correction, cell, spacegroup)
+    assert np.linalg.norm(symmetric) < 0.9 * np.linalg.norm(correction), (
+        "the fixture must have a symmetric part to lose"
+    )
+
+    report = run_decomposition(cfg)
+
+    # The decisive assertion: the target the stage decomposed is symmetrize(u), not u.
+    # Passing the raw correction through instead makes target_norm equal ||u||.
+    assert report["targets"]["full_correction"]["target_norm"] == pytest.approx(
+        float(np.linalg.norm(symmetric)), rel=1e-6
+    )
+    assert report["targets"]["full_correction"]["target_norm"] < 0.9 * float(np.linalg.norm(correction))
+    assert report["antisymmetric_norm_fraction"] > 0.1
+
+    # And the maps written from that target reconstruct symmetrize(u), not u.
+    directory = cfg.run.output_dir / "decomposition"
+    explained = np.array(gemmi.read_ccp4_map(str(directory / "explained.ccp4")).grid, copy=True)
+    unexplained = np.array(gemmi.read_ccp4_map(str(directory / "unexplained.ccp4")).grid, copy=True)
+    tolerance = 1e-5 * float(np.abs(symmetric).max())
+    np.testing.assert_allclose(explained + unexplained, symmetric, atol=tolerance, rtol=0.0)
 
 
 def test_a_missing_fit_is_reported(prepared_dataset):

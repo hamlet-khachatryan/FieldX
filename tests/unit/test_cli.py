@@ -85,3 +85,21 @@ def test_decompose_invokes_the_analysis_with_the_requested_options(tiny_dataset,
     result = runner.invoke(app, ["decompose", str(tiny_dataset["config_path"]), "--basis", "full", "--n-trials", "3"])
     assert result.exit_code == 0, result.output
     assert seen == {"basis": "full", "n_trials": 3}
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_decompose_rejects_a_non_positive_trial_count(tiny_dataset, monkeypatch, value):
+    """The flag must enforce the same `ge=1` the configuration does.
+
+    Unvalidated, `--n-trials 0` is falsy and silently falls back to the configured default
+    -- the run reports 8 trials while the operator asked for none. `--n-trials -1` is worse:
+    `range(-1)` is empty, the control's mean is a mean over nothing, and `json.dumps` writes
+    the resulting NaN as a bare `NaN` token that no RFC-8259 parser will read back.
+    """
+
+    def fail(*args, **kwargs):
+        raise AssertionError("the analysis must not be reached with an invalid trial count")
+
+    monkeypatch.setattr(decomposition_module, "run_decomposition", fail)
+    result = runner.invoke(app, ["decompose", str(tiny_dataset["config_path"]), "--n-trials", value])
+    assert result.exit_code != 0
