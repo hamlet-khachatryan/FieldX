@@ -129,9 +129,34 @@ Check `sigma_a.mean_figure_of_merit` and the per-shell `D`: `D` far from 1 means
 scaling is off, and `m` near 1 everywhere means either an excellent model or (more often)
 that the weights were estimated on data the model had already fitted.
 
-## Reading the decomposition
+## Running and reading the decomposition
 
 Stage 72 asks whether ordinary refinement could have produced what the field inferred.
+It runs as part of `scripts/submit.sh`, needs no GPU, and can be re-run by hand against
+a finished run at any time:
+
+```bash
+fieldrefine decompose configs/<name>.yaml
+fieldrefine decompose configs/<name>.yaml --basis full --n-trials 16
+```
+
+Both flags override the config for that invocation only. The `decomposition:` block
+holds the defaults, and every key has one, so an absent block behaves as shown:
+
+```yaml
+decomposition:
+  enabled: true              # false skips the stage entirely and writes nothing at all
+  basis: coordinates         # coordinates | coordinates_b | full | residue_rigid
+  box_radius_angstrom: null  # extra per-column truncation; null keeps Gemmi's own cutoff
+  ridge: 0.0                 # Tikhonov damping, for an ill-conditioned basis
+  n_capacity_trials: 8       # matched random fields used to calibrate the control
+  write_maps: true           # write explained.ccp4 and unexplained.ccp4
+```
+
+A larger basis explains more of anything at all, which is precisely what the capacity
+control is there to measure: widening `basis` raises the control floor along with the
+reported fraction. Compare `explained_above_control` across bases, never
+`explained_fraction` on its own.
 
 Read `decomposition.json` in this order:
 
