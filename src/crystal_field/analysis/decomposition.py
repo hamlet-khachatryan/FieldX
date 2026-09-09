@@ -11,6 +11,7 @@ basis explains of matched random fields.
 
 from __future__ import annotations
 
+import gemmi
 import numpy as np
 
 
@@ -50,3 +51,50 @@ def solve_normal_equations(gram, rhs, target_norm_squared, ridge: float = 0.0) -
         "condition_number": condition,
         "residual_norm_squared": residual,
     }
+
+
+def symmetrize_grid(array, cell, spacegroup):
+    """Average a grid over the space group.
+
+    Only the symmetric component of the correction reaches F_calc through
+    symmetry_projected_fcalc, and every Phi column is symmetric by construction, so the
+    antisymmetric part is orthogonal to the basis and would otherwise register as
+    permanently unexplained density that no basis could reach.
+    """
+    grid = gemmi.FloatGrid(np.ascontiguousarray(array, dtype=np.float32))
+    grid.set_unit_cell(cell)
+    grid.spacegroup = spacegroup
+    grid.symmetrize_avg()
+    return np.array(grid.array, dtype=np.float64, copy=True)
+
+
+def split_symmetric(array, cell, spacegroup):
+    """Return the symmetric component and the norm fraction carried by the rest."""
+    array = np.asarray(array, dtype=np.float64)
+    symmetric = symmetrize_grid(array, cell, spacegroup)
+    total = float(np.linalg.norm(array))
+    antisymmetric = float(np.linalg.norm(array - symmetric))
+    return symmetric, (antisymmetric / total if total > 0 else 0.0)
+
+
+def correction_from_fit(cfg, arrays):
+    """Recover u = L z on the grid from the fitted latent field."""
+    import jax
+    import jax.numpy as jnp
+
+    from crystal_field.model.prior import apply_transfer, build_transfer
+
+    path = cfg.run.output_dir / "fit" / "z_map.npy"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} is missing; run `fieldrefine fit-map CONFIG` first")
+
+    transfer = build_transfer(
+        tuple(arrays.rho0.shape),
+        arrays.reciprocal_metric,
+        arrays.unit_cell_volume,
+        arrays.d_min_angstrom,
+        cfg.prior,
+        arrays.rho0.dtype,
+    )
+    z = jnp.asarray(np.load(path), dtype=arrays.rho0.dtype)
+    return np.asarray(jax.device_get(apply_transfer(z, transfer, arrays.unit_cell_volume)), dtype=np.float64)

@@ -1,9 +1,11 @@
 """Decomposition of the inferred correction onto the atomic tangent space."""
 
+import gemmi
 import numpy as np
 import pytest
+from conftest import write_tiny_model
 
-from crystal_field.analysis.decomposition import solve_normal_equations
+from crystal_field.analysis.decomposition import solve_normal_equations, split_symmetric, symmetrize_grid
 
 
 def _problem(n_rows=200, n_columns=12, seed=0):
@@ -82,3 +84,53 @@ def test_ridge_does_not_leak_into_the_reported_residual():
 
     expected_fraction = 1.0 - data_residual / float(target @ target)
     np.testing.assert_allclose(result["explained_fraction"], expected_fraction, rtol=1e-8, atol=1e-10)
+
+
+def test_symmetrizing_an_already_symmetric_grid_changes_nothing(tmp_path):
+    structure = gemmi.read_structure(str(write_tiny_model(tmp_path / "m.pdb")))
+    structure.setup_entities()
+    spacegroup = gemmi.SpaceGroup("P 21 21 21")
+    from crystal_field.crystallography.density import model_density_on_grid
+
+    density, _ = model_density_on_grid(structure[0], structure.cell, spacegroup, (24, 30, 36), 2.6, 1e-6)
+    again = symmetrize_grid(density.astype(np.float64), structure.cell, spacegroup)
+    np.testing.assert_allclose(again, density, rtol=1e-5, atol=1e-7)
+
+
+def test_symmetrizing_is_idempotent(tmp_path):
+    rng = np.random.default_rng(0)
+    cell = gemmi.UnitCell(20, 24, 28, 90, 90, 90)
+    spacegroup = gemmi.SpaceGroup("P 21 21 21")
+    field = rng.standard_normal((24, 30, 36))
+    once = symmetrize_grid(field, cell, spacegroup)
+    twice = symmetrize_grid(once, cell, spacegroup)
+    np.testing.assert_allclose(twice, once, rtol=1e-5, atol=1e-7)
+
+
+def test_the_antisymmetric_fraction_is_reported():
+    """A random field in a symmetric group is mostly antisymmetric; that must be visible."""
+    rng = np.random.default_rng(1)
+    cell = gemmi.UnitCell(20, 24, 28, 90, 90, 90)
+    spacegroup = gemmi.SpaceGroup("P 21 21 21")
+    field = rng.standard_normal((24, 30, 36))
+    symmetric, antisymmetric_fraction = split_symmetric(field, cell, spacegroup)
+    assert 0.0 < antisymmetric_fraction < 1.0
+    assert np.linalg.norm(symmetric) < np.linalg.norm(field)
+
+
+def test_a_symmetric_field_has_no_antisymmetric_part(tmp_path):
+    structure = gemmi.read_structure(str(write_tiny_model(tmp_path / "m.pdb")))
+    structure.setup_entities()
+    spacegroup = gemmi.SpaceGroup("P 21 21 21")
+    from crystal_field.crystallography.density import model_density_on_grid
+
+    density, _ = model_density_on_grid(structure[0], structure.cell, spacegroup, (24, 30, 36), 2.6, 1e-6)
+    _, fraction = split_symmetric(density.astype(np.float64), structure.cell, spacegroup)
+    assert fraction < 1e-3
+
+
+def test_p1_symmetrization_is_the_identity():
+    rng = np.random.default_rng(2)
+    field = rng.standard_normal((16, 16, 16))
+    result = symmetrize_grid(field, gemmi.UnitCell(20, 20, 20, 90, 90, 90), gemmi.SpaceGroup("P 1"))
+    np.testing.assert_allclose(result, field, rtol=1e-6, atol=1e-8)
