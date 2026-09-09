@@ -240,6 +240,26 @@ class AtomicBenchmarkConfig(Strict):
     occupancy_delta: float = Field(0.02, gt=0.0, lt=0.5)
 
 
+class DecompositionConfig(Strict):
+    """Decomposition of the inferred correction onto the atomic tangent space.
+
+    A read-only diagnostic: it answers whether ordinary refinement -- moving atoms,
+    changing B factors or occupancies -- could have produced the density the field
+    inferred. It does not change the model.
+    """
+
+    enabled: bool = True
+    basis: Literal["coordinates", "coordinates_b", "full", "residue_rigid"] = "coordinates"
+    # Optional extra truncation of each column. None keeps whatever Gemmi's own
+    # density cutoff produces, which is already sparse (~7% of the grid).
+    box_radius_angstrom: float | None = Field(default=None, gt=0.0)
+    ridge: float = Field(0.0, ge=0.0)
+    # With thousands of free parameters the basis fits noise; matched random fields
+    # calibrate what "explained" means. Never fewer than one.
+    n_capacity_trials: int = Field(8, ge=1)
+    write_maps: bool = True
+
+
 class AppConfig(Strict):
     run: RunConfig
     input: InputConfig
@@ -252,6 +272,7 @@ class AppConfig(Strict):
     optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     information: InformationConfig = Field(default_factory=InformationConfig)
     atomic_benchmark: AtomicBenchmarkConfig = Field(default_factory=AtomicBenchmarkConfig)
+    decomposition: DecompositionConfig = Field(default_factory=DecompositionConfig)
 
     @property
     def has_free_set(self) -> bool:
@@ -379,6 +400,7 @@ def check_config(path: str | Path) -> dict:
         "target": "R_work and R_free" if cfg.has_free_set else "R_work only (no held-out set)",
         "starting_density": cfg.baseline.starting_density,
         "prior_kernel": cfg.prior.kernel,
+        "decomposition_basis": cfg.decomposition.basis,
         "latent_distribution": cfg.prior.latent_distribution,
         "fit_scope": cfg.optimizer.fit_scope,
         **crystal,

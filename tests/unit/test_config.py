@@ -162,3 +162,32 @@ def test_free_fraction_window_must_be_ordered(tiny_dataset):
         AppConfig.model_validate(
             _base(tiny_dataset, input={"expected_free_fraction_min": 0.2, "expected_free_fraction_max": 0.1})
         )
+
+
+def test_decomposition_defaults(tiny_dataset):
+    cfg = tiny_dataset["cfg"]
+    assert cfg.decomposition.enabled is True
+    assert cfg.decomposition.basis == "coordinates"
+    assert cfg.decomposition.box_radius_angstrom is None
+    assert cfg.decomposition.ridge == 0.0
+    assert cfg.decomposition.n_capacity_trials == 8
+    assert cfg.decomposition.write_maps is True
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"basis": "nonsense"}, "basis"),
+        ({"ridge": -1.0}, "greater than or equal to 0"),
+        ({"n_capacity_trials": 0}, "greater than or equal to 1"),
+        ({"box_radius_angstrom": 0.0}, "greater than 0"),
+    ],
+)
+def test_invalid_decomposition_parameters(tiny_dataset, override, message):
+    with pytest.raises(ValueError, match=message):
+        AppConfig.model_validate(_base(tiny_dataset, decomposition=override))
+
+
+def test_config_check_reports_the_decomposition_basis(tiny_dataset):
+    report = check_config(tiny_dataset["config_path"])
+    assert report["decomposition_basis"] == "coordinates"
