@@ -15,8 +15,9 @@ from crystal_field.crystallography.density import (
     model_electron_count,
 )
 from crystal_field.crystallography.geometry import cell_tuple, reciprocal_metric_from_parameters
+from crystal_field.crystallography.mtz import describe_mtz, is_mtz, read_mtz_dataset
 from crystal_field.crystallography.pdb import AMPLITUDE_NAMES, FREE_NAMES, SIGMA_NAMES
-from crystal_field.crystallography.symmetry import symmetry_arrays
+from crystal_field.crystallography.symmetry import symmetry_arrays, validate_grid_shape
 
 TRAIN, TUNE, FREE = 0, 1, 2
 
@@ -29,16 +30,25 @@ def _require_rs():
     return rs
 
 
-def load_reflections(cfg):
+def load_reflections(cfg, with_selection=False):
+    """Load merged reflections, resolving the MTZ dataset explicitly.
+
+    For an MTZ this never falls back to reciprocalspaceship's implicit choice, which
+    keeps the last duplicate column while recording the first dataset's wavelength.
+    """
     rs = _require_rs()
     path = Path(cfg.input.reflections)
     if not path.is_file():
         raise FileNotFoundError(f"input.reflections does not exist: {path}")
-    suffixes = "".join(path.suffixes).lower()
-    ds = rs.read_mtz(str(path)) if suffixes.endswith((".mtz", ".mtz.gz")) else rs.read_cif(str(path))
+
+    if is_mtz(path):
+        labels = [cfg.input.columns.observation, cfg.input.columns.sigma, cfg.input.columns.free]
+        ds, selection = read_mtz_dataset(path, labels, cfg.input.mtz_dataset)
+    else:
+        ds, selection = rs.read_cif(str(path)), None
     if not bool(ds.merged):
         raise ValueError("FieldX v3 expects merged reflection data")
-    return ds
+    return (ds, selection) if with_selection else ds
 
 
 def _canonical_hash_key(hkl, pair_friedel):
@@ -59,13 +69,12 @@ def choose_grid_shape(ds, cfg):
     The physical cell and the computational grid are distinct: the grid follows from
     d_min / samples_per_dmin and is rounded up to an FFT-friendly size by Gemmi.
     """
+    if cfg.grid.shape is not None:
+        return validate_grid_shape(cfg.grid.shape, ds.cell, ds.spacegroup)
     grid = gemmi.FloatGrid()
     grid.spacegroup = ds.spacegroup
     grid.set_unit_cell(ds.cell)
-    if cfg.grid.shape is not None:
-        grid.set_size(*(int(x) for x in cfg.grid.shape))
-    else:
-        grid.set_size_from_spacing(cfg.resolution.d_min_angstrom / cfg.grid.samples_per_dmin, gemmi.GridSizeRounding.Up)
+    grid.set_size_from_spacing(cfg.resolution.d_min_angstrom / cfg.grid.samples_per_dmin, gemmi.GridSizeRounding.Up)
     return (grid.nu, grid.nv, grid.nw)
 
 
@@ -98,7 +107,7 @@ def _model_reflection_consistency(cfg, ds):
 
 
 def inspect_dataset(cfg):
-    ds = load_reflections(cfg)
+    ds, selection = load_reflections(cfg, with_selection=True)
     ds.compute_dHKL(inplace=True)
     free_counts = None
     key = cfg.input.columns.free
@@ -123,6 +132,8 @@ def inspect_dataset(cfg):
         "free_counts": free_counts,
         "split_strategy": cfg.split.strategy,
         "suggested_grid_shape": choose_grid_shape(ds, cfg),
+        "mtz": describe_mtz(cfg.input.reflections) if is_mtz(cfg.input.reflections) else None,
+        "mtz_selection": selection,
         "model": _model_reflection_consistency(cfg, ds),
     }
 
@@ -134,7 +145,7 @@ def prepare_reflections(cfg):
     nuisance calibration may ever see. D_free is written once here and then never read
     until a model lock exists.
     """
-    ds = load_reflections(cfg)
+    ds, selection = load_reflections(cfg, with_selection=True)
     obs_key, sig_key = cfg.input.columns.observation, cfg.input.columns.sigma
     for key in (obs_key, sig_key):
         if key not in ds:
@@ -216,6 +227,8 @@ def prepare_reflections(cfg):
         )
 
     cell = cell_tuple(ds.cell)
+    # Rotational operators only: centring contributes an exact factor of one once
+    # systematically absent reflections have been removed above.
     rotations, translations = symmetry_arrays(ds.spacegroup)
     out = cfg.run.data_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -241,6 +254,10 @@ def prepare_reflections(cfg):
         "free_column": cfg.input.columns.free,
         "free_test_value": cfg.input.free_test_value,
         "split_strategy": cfg.split.strategy,
+        # Provenance: which dataset inside the file this refinement actually used.
+        "mtz_dataset_id": selection["dataset_id"] if selection else None,
+        "mtz_dataset_name": selection["dataset_name"] if selection else None,
+        "wavelength": selection["wavelength"] if selection else None,
         "has_free_set": cfg.has_free_set,
         "n_total_kept": len(obs),
         "n_train": counts[TRAIN],
@@ -283,6 +300,27 @@ def make_model_density(cfg):
     metadata = json.loads((out / "metadata.json").read_text())
     st, cell, sg = _model_for_metadata(cfg, metadata)
     shape = tuple(int(x) for x in metadata["grid_shape"])
+
+    if cfg.baseline.starting_density == "zero":
+        # The capacity control: an empty cell. The model is still read above so the cell
+        # and space group are verified against the reflections, but its density is not used.
+        rho = np.zeros(shape, dtype=np.float32)
+        np.save(out / "rho0.npy", rho)
+        _require_rs().io.write_ccp4_map(rho, str(out / "rho0.ccp4"), cell, sg)
+        stats = {
+            "shape": list(shape),
+            "declared_grid_shape": list(shape),
+            "dtype": str(rho.dtype),
+            "starting_density": "zero",
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "note": "Empty starting density: a capacity control, not a phasing calculation.",
+        }
+        (out / "rho0_stats.json").write_text(json.dumps(stats, indent=2))
+        return stats
+
     rho, dc = model_density_on_grid(
         st[0], cell, sg, shape, cfg.resolution.d_min_angstrom, cfg.baseline.density_cutoff, cfg.input.scattering
     )
@@ -299,6 +337,7 @@ def make_model_density(cfg):
         "gemmi_blur_Bextra": float(getattr(dc, "blur", 0.0)),
         "gemmi_cutoff": float(dc.cutoff),
         "scattering": cfg.input.scattering,
+        "starting_density": "model",
     }
     (out / "rho0_stats.json").write_text(json.dumps(stats, indent=2))
     return stats
@@ -316,6 +355,20 @@ def check_model_density(cfg, n_sample=256):
     st, cell, sg = _model_for_metadata(cfg, metadata)
     rho = np.load(out / "rho0.npy")
     volume = float(metadata["unit_cell_volume"])
+
+    if cfg.baseline.starting_density == "zero":
+        # Nothing to compare against; assert only that the cell really is empty.
+        result = {
+            "starting_density": "zero",
+            "max_abs_density": float(np.abs(rho).max()),
+            "pass": bool(np.all(rho == 0.0)),
+            "note": "Empty starting density; the model-agreement checks do not apply.",
+        }
+        cfg.run.output_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.run.output_dir / "rho0_check.json").write_text(json.dumps(result, indent=2))
+        if not result["pass"]:
+            raise RuntimeError("starting_density='zero' but rho0.npy is not identically zero")
+        return result
 
     integrated = float(rho.sum()) * volume / rho.size
     expected = model_electron_count(st[0], sg)

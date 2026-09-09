@@ -1,0 +1,360 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{enumitem}
+
+\title{Continuous Electron-Density Field Refinement Beyond the Atomic Model Manifold}
+\author{Authors to be added}
+\date{Draft -- \today}
+
+\newcommand{\Rwork}{\ensuremath{R_{\mathrm{work}}}}
+\newcommand{\Rfree}{\ensuremath{R_{\mathrm{free}}}}
+\newcommand{\rhozero}{\ensuremath{\rho_0}}
+\newcommand{\dd}{\mathrm{d}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Macromolecular crystallographic refinement represents electron density through a compact atomistic parameterization consisting primarily of atomic coordinates, occupancies, and displacement parameters. This representation is efficient when the underlying density is well described by localized atomic peaks, but it restricts refinement to a low-dimensional nonlinear manifold within the space of experimentally resolvable density fields. We develop a complementary refinement framework in which a conventionally refined structure supplies a high-quality initial density, after which a band-limited continuous density correction is inferred directly from Bragg observations. Spatial statistics are controlled by explicit priors, including Mat\'ern, squared-exponential, band-limited white, and multiscale covariance models combined with Gaussian or heavy-tailed latent distributions. The correction prior is deliberately generic: it favours spatially coherent, multi-voxel density change and disfavours isolated single-voxel excursions, but it does not require an inferred feature to correspond to an atom, a coordinate shift, a displacement parameter or a predefined collective mode. Model selection is performed entirely within the crystallographic work set, and the held-out reflections remain inaccessible until a final model lock is created, after which they are read exactly once. The first experiment is the 1.80~\AA\ ubiquitin dataset PDB 1UBQ; the next benchmark is the 1.21~\AA, ambient-temperature triclinic lysozyme dataset PDB 6O2H. The primary test is whether field refinement lowers both \Rwork\ and a genuinely untouched \Rfree\ while maintaining or reducing their generalization gap. \textbf{This manuscript describes the formulation, the implementation and the validation protocol; it reports no experimental results, and every results subsection below is an explicit placeholder.} A future extension will use associated diffuse-scattering data to model density fluctuations around the Bragg-derived mean field; diffuse scattering is deliberately excluded from the present Bragg likelihood.
+\end{abstract}
+
+\section*{Status of this draft}
+This document separates six things that are easy to conflate, and labels each one:
+motivation (Section~\ref{sec:intro}), the mathematical method (Sections~\ref{sec:field}--\ref{sec:forward}),
+the computational method (Section~\ref{sec:numerics}), the validation protocol
+(Section~\ref{sec:crossval}), the proposed experiments (Section~\ref{sec:experiments}),
+and the expected outcomes and how each would be interpreted (Section~\ref{sec:expected}).
+No experimental result is reported. Section~\ref{sec:results} exists to hold results once
+they are produced and currently contains only placeholders. Nothing in this draft should be
+cited as a measurement.
+
+\section{Introduction}
+\label{sec:intro}
+Atomic refinement has been central to macromolecular crystallography because it converts a very large inverse problem into a compact set of interpretable parameters. A model density can be written as
+\begin{equation}
+  \rho_{\mathrm{atom}}(\mathbf r;\boldsymbol\theta),
+\end{equation}
+where $\boldsymbol\theta$ includes atomic positions, occupancies, isotropic or anisotropic displacement parameters, and additional nuisance parameters. The resulting efficiency is also a restriction: refinement can explore only densities contained in the image of this parameterization.
+
+Cross-validation through the free $R$ value was introduced specifically to detect improvements that arise from fitting flexibility rather than predictive structural information \cite{brunger1992}. The persistence of discrepancies between measured and calculated diffraction has also motivated discussion of model inadequacy in macromolecular crystallography \cite{holton2014}. Here we focus on a narrower question than the historical ``R-factor gap'': after conventional atomic refinement has produced a strong starting point, does experimentally supported density remain outside the local atomic coordinate/occupancy/ADP model class?
+
+We formulate this as inference in an experimentally band-limited density field. The atomic model is retained as an initializer and reference state rather than discarded. The approach is designed so that conventional refinement directions remain representable while additional continuous density directions can be tested under explicit statistical regularization.
+
+\section{Target datasets}
+\label{sec:targets}
+The first experiment is PDB 1UBQ, ubiquitin in space group $P2_12_12_1$ at 1.80~\AA. It is
+deliberately small: 6029 merged amplitudes, 660 non-hydrogen atoms, and a computational grid
+of $90\times72\times50$ voxels at the sampling convention used throughout. A first experiment
+on a compact, unexceptional dataset tests the formulation rather than the engineering.
+
+1UBQ carries an important caveat. Its deposited \texttt{FreeR\_flag} column is constant, so
+the entry defines no held-out set. The held-out reflections are therefore a deterministic,
+Friedel-paired hash partition, produced before any fitting and never read until the model
+lock exists. That set is a valid cross-validation statistic under the protocol of
+Section~\ref{sec:crossval}, but it is \emph{not} the deposited crystallographic \Rfree, and it
+is reported as a held-out test $R$ throughout. Every artifact produced by the implementation
+records which of the two cases applies.
+
+The next benchmark is PDB 6O2H, hen egg-white lysozyme in space group $P1$ collected at
+ambient temperature and refined to 1.21~\AA, with deposited values of approximately
+$\Rwork=0.097$ and $\Rfree=0.117$. It deposits conventional free flags, so it supplies the
+deposited-\Rfree\ comparison that 1UBQ cannot. The same experiment is associated with a finely
+sampled reciprocal-space diffuse-scattering map deposited as CXIDB 128 \cite{meisburger2020}.
+
+The present work uses Bragg observations only. This separation is intentional: Bragg peaks
+constrain the average periodic density, whereas diffuse scattering contains information about
+fluctuations and correlations around that mean. The diffuse data are inspected but never
+enter the likelihood.
+
+\section{Field formulation}
+\label{sec:field}
+Let $M$ denote the periodic crystallographic unit cell and let
+\begin{equation}
+  \rho:M\rightarrow\mathbb R
+\end{equation}
+be the mean electron-density field. A conventional atomistic model is converted to an unblurred real-space density using GEMMI \cite{wojdyr2022}, defining $\rhozero$. The inferred field is
+\begin{equation}
+  \boxed{\rho(\mathbf r)=\rhozero(\mathbf r)+u(\mathbf r)}.
+\end{equation}
+The correction is parameterized by a whitened latent field $z$,
+\begin{equation}
+  u=L_{\vartheta}z,
+\end{equation}
+where $L_{\vartheta}$ is an explicitly band-limited spectral operator.
+
+For a Mat\'ern-type model on a periodic cell,
+\begin{equation}
+  \widehat{L_{\vartheta}z}(\mathbf k)
+  \propto
+  \left(\kappa^2+4\pi^2\lVert\mathbf k\rVert_G^2\right)^{-\alpha/2}
+  \hat z(\mathbf k),
+\end{equation}
+where $\lVert\mathbf k\rVert_G$ is defined by the reciprocal metric tensor. Frequencies beyond the experimental high-resolution limit are set exactly to zero. The operator is normalized so that, under a Gaussian latent field, the prior root-mean-square density correction is the configured parameter $\tau$.
+
+\subsection{Prior families}
+The implementation compares several predeclared model classes using an internal tuning subset of the work reflections:
+\begin{itemize}[nosep]
+  \item single-scale Mat\'ern covariance;
+  \item squared-exponential covariance;
+  \item band-limited white covariance as a flexibility control;
+  \item multiscale mixtures of Mat\'ern covariance components;
+  \item Gaussian, Student-$t$, smoothed-Laplace, and Cauchy latent statistics.
+\end{itemize}
+These alternatives test both spatial correlation assumptions and robustness/sparsity assumptions in the whitened field representation. The first experiment on a new dataset restricts itself to four spatial candidates -- Mat\'ern at three correlation lengths and a squared-exponential control, all with Gaussian latent statistics -- so that the experiment tests the formulation rather than confounding it with additional prior flexibility.
+
+All prior parameters are expressed in physical reciprocal-space units through the reciprocal metric tensor, not in voxels. The correlation length and the band limit therefore mean the same thing on any computational grid, and refining the grid does not silently alter the prior.
+
+\subsection{What the prior does and does not assert}
+The purpose of the spatial correlation is narrow. It asserts that coherent multi-voxel density changes are plausible and that isolated single-voxel excursions are strongly disfavoured, which is a statement about noise, not about chemistry. It does \emph{not} assert that an inferred density feature must correspond to an atom, a coordinate displacement, an occupancy, a displacement parameter, or any predefined collective motion.
+
+This distinction is the point of the method rather than a caveat on it. The motivating intuition is that one physical feature or motion produces a coherent multi-voxel pattern while an isolated spike is likely noise; but experimentally supported density may be less structured than any explicit atomic or physical template, and the formulation must be able to represent it. Constraining the correction to a dictionary of physical modes would answer a different and easier question. A richer formulation combining an optional interpretable mode dictionary $\Phi a$ with a retained generic correlated residual $L_{\mathrm{res}}z$ is a natural extension, provided the residual keeps its full generality; that extension is not used here.
+
+\section{Crystallographic forward model}
+\label{sec:forward}
+For a candidate density,
+\begin{equation}
+  F_{\rho}(\mathbf h)
+  =\int_M \rho(\mathbf r)e^{-2\pi i\mathbf h\cdot\mathbf r}\,\dd\mathbf r.
+\end{equation}
+The computation is performed by accelerator FFTs, with explicit numerical comparison against GEMMI FFT conventions before fitting. Reflection I/O and crystallographic tabular operations use GEMMI and reciprocalspaceship \cite{greisman2021}.
+
+A conventional bulk-solvent mask and overall scale model are treated as nuisance components rather than density discoveries. GEMMI scaling is fitted only on the reflections permitted by the current statistical stage. During prior comparison this means the training subset only; after prior selection it is refitted on the complete work set. The corresponding per-reflection overall and solvent scale factors are frozen during each field optimization.
+
+For amplitude observations $F_{\mathrm{obs},h}$ with uncertainties $\sigma_h$, the basic Gaussian objective is
+\begin{equation}
+  \Phi(z)
+  =\frac12\sum_{h\in\mathcal W}
+   \left(
+   \frac{|F_{\rho(z),h}|-F_{\mathrm{obs},h}}{\sigma_h}
+   \right)^2
+   +\Psi(z),
+\end{equation}
+where $\mathcal W$ is the active fitting subset and $\Psi$ is the negative log prior. Candidate observation models are Gaussian and Student-$t$; the observation model is fixed before the free-set evaluation.
+
+\section{Relation to ordinary atomic refinement}
+Near a refined atomic model, conventional parameter changes induce density perturbations in the tangent space
+\begin{equation}
+  T_{\rhozero}\mathcal M_{\mathrm{atom}}
+  =\mathrm{span}\left\{
+  \frac{\partial\rho}{\partial x_i},
+  \frac{\partial\rho}{\partial y_i},
+  \frac{\partial\rho}{\partial z_i},
+  \frac{\partial\rho}{\partial B_i},
+  \frac{\partial\rho}{\partial q_i},\ldots
+  \right\}.
+\end{equation}
+For example, a small coordinate displacement produces approximately
+\begin{equation}
+  \delta\rho_i\simeq-\delta\mathbf x_i\cdot\nabla\rho_i.
+\end{equation}
+The field representation should not penalize such ordinary directions so strongly that it loses the capabilities of atomic refinement. We therefore include an atomic representability benchmark: selected atoms are perturbed independently in coordinate, isotropic $B$, and occupancy; GEMMI converts each perturbed model to density; and the band-limited perturbation is mapped back to latent coordinates. Priors with excessive latent cost for these elementary perturbations are considered unsuitable even if they perform well on broad density changes.
+
+\section{Cross-validation and model selection}
+\label{sec:crossval}
+The held-out set is never used for optimization, early stopping, prior selection, hyperparameter selection, grid selection, nuisance fitting, or model interpretation. The original work set is deterministically divided into
+\begin{equation}
+  \mathcal W=\mathcal W_{\mathrm{train}}\cup\mathcal W_{\mathrm{tune}}.
+\end{equation}
+Each prior candidate is fitted on $\mathcal W_{\mathrm{train}}$ and ranked on $\mathcal W_{\mathrm{tune}}$. After a prior is selected, the nuisance scale model and field are refitted using all of $\mathcal W$. The final configuration, starting density, work-scale arrays, reflection split, and optimized latent field are hashed into a model lock. Only after this lock exists is the free set evaluated.
+
+The primary experimental success criterion is
+\begin{equation}
+  \Rwork^{\mathrm{field}}<\Rwork^{\mathrm{atomic}}
+  \quad\mathrm{and}\quad
+  \Rfree^{\mathrm{field}}<\Rfree^{\mathrm{atomic}}.
+\end{equation}
+We additionally report
+\begin{equation}
+  \Delta G=
+  (\Rfree-\Rwork)_{\mathrm{field}}
+  -(\Rfree-\Rwork)_{\mathrm{atomic}}.
+\end{equation}
+A reduction in work-set error without a reduction in held-out error is interpreted as overfitting rather than evidence for missing density. The generalization gap is reported as a diagnostic and is never optimized.
+
+The one-shot property is enforced mechanically rather than by operator discipline. Each read of the held-out reflections appends to an append-only ledger stored beside the prepared split, after which both the evaluation and any re-freezing of a revised model refuse to proceed without an explicit override that is itself recorded. Because the ledger travels with the split rather than with a run directory, evaluating, adjusting a hyperparameter, re-freezing into a fresh output directory and evaluating again is caught.
+
+Where an entry deposits no usable free flags, the held-out set is a deterministic Friedel-paired hash partition fixed before any fitting. Such a result is reported as a held-out test $R$ and never as the deposited crystallographic \Rfree; the distinction is recorded in the machine-readable output of every evaluation.
+
+\section{Local information content}
+At a reference field, let $r(z)$ be the whitened residual vector and
+\begin{equation}
+  J=\frac{\partial r}{\partial z}.
+\end{equation}
+The eigenproblem
+\begin{equation}
+  J^T J v_i=\lambda_i v_i
+\end{equation}
+identifies latent density modes ordered by experimental sensitivity relative to the prior. Under a local Gaussian approximation, posterior variance along $v_i$ is approximately
+\begin{equation}
+  \operatorname{Var}(v_i^Tz\mid D)\simeq\frac{1}{1+\lambda_i}.
+\end{equation}
+We report the leading spectrum, a lower bound on effective data-informed dimension,
+\begin{equation}
+  d_{\mathrm{eff}}\geq\sum_{i\in\mathrm{computed}}\frac{\lambda_i}{1+\lambda_i},
+\end{equation}
+and the corresponding information lower bound
+\begin{equation}
+  I\geq\frac12\sum_{i\in\mathrm{computed}}\log(1+\lambda_i).
+\end{equation}
+The calculation uses matrix-free Jacobian-vector and transpose-Jacobian-vector products.
+
+\section{Computational method and numerical validation}
+\label{sec:numerics}
+No production field fit is accepted unless the following gates pass:
+\begin{enumerate}[nosep]
+  \item the starting density reproduces the crystallographic model: its integral equals the
+    model electron count, and its Fourier transform reproduces structure factors obtained by
+    direct summation over atoms;
+  \item GEMMI and accelerator FFT structure factors agree numerically, under the sign
+    relation the implementation declares;
+  \item finite-difference directional derivatives agree with automatic differentiation;
+  \item $\langle Jv,w\rangle=\langle v,J^Tw\rangle$ within tolerance;
+  \item accelerator-specific unit tests pass under SLURM;
+  \item atomic coordinate, $B$, occupancy and anisotropic ADP perturbations remain
+    representable at acceptable prior cost.
+\end{enumerate}
+Each gate raises and terminates the dependency chain rather than emitting a warning.
+
+Two implementation details matter for reproducing the numerics. First, the objective is a
+chi-squared sum over $10^3$--$10^5$ reflections and is therefore orders of magnitude larger
+than its directional derivative; a fixed small finite-difference step is pure cancellation
+noise in single precision. The step is chosen adaptively as
+$\varepsilon\simeq(u\,|\Phi|/|\Phi'|)^{1/3}$, with $u$ the unit roundoff. Second, the
+starting density must be built on exactly the declared computational grid: the density
+calculator will otherwise re-derive its own grid size, placing the density, the solvent mask
+and the reflection index guard on mutually inconsistent grids so that a single Miller index
+gathers a different Fourier coefficient from each.
+
+No dense Jacobian is formed anywhere. $Jv$ is a forward-mode directional derivative, $J^Tw$
+is a reverse-mode pullback, the prior operator is applied by FFT, and the eigensolve is
+matrix-free, so no $N_{\mathrm{vox}}\times N_{\mathrm{vox}}$ object is ever allocated.
+Device memory is dominated by a small number of full three-dimensional fields plus the
+optimizer or eigensolver basis, which is estimated in advance and checked against a
+configured budget before the eigensolve allocates.
+
+The implementation uses JAX for accelerator FFTs and automatic differentiation and Optax for optimization \cite{jax2018,deepmind2020}.
+
+\section{Proposed experiments}
+\label{sec:experiments}
+Two experiments are planned, in order.
+
+\paragraph{Experiment 1 (1UBQ, pilot).} A single dataset, one GPU, the four-candidate
+spatial prior grid of Section~\ref{sec:field}, a short optimizer budget, and a small number
+of information modes. Its purpose is to establish that the numerical gates pass on real
+data, to measure compilation time, time per iteration, device memory and objective
+convergence, and to produce a first held-out comparison. Its held-out set is a hash
+partition, so it can falsify the method but cannot by itself establish a deposited-\Rfree\
+result.
+
+\paragraph{Experiment 2 (6O2H, benchmark).} The same protocol at 1.21~\AA\ on an entry with
+deposited free flags, where the comparison is against the deposited \Rwork\ and \Rfree\
+directly. A broader prior grid, including heavy-tailed latent statistics and multiscale
+mixtures, is available for this benchmark but is not part of the pilot.
+
+Both experiments are pre-registered by their configuration and prior-grid files, which are
+committed before the run. The prior grid, the observation model, the sampling convention and
+the split are fixed before any held-out reflection is read.
+
+\section{Expected outcomes and their interpretation}
+\label{sec:expected}
+Four outcomes are distinguishable in advance, and each has a prepared interpretation.
+
+\begin{enumerate}[nosep]
+  \item \textbf{Both \Rwork\ and \Rfree\ fall.} The primary criterion is met: the data support
+    density outside the local atomic model class. The magnitude of $\Delta G$ then indicates
+    whether the improvement is predictive or partly absorbed flexibility.
+  \item \textbf{\Rwork\ falls, \Rfree\ does not.} Overfitting. The correction is expressing
+    fitting capacity, not information, and the prior is too permissive at the selected $\tau$.
+  \item \textbf{Neither moves appreciably.} The atomic model already saturates the
+    experimentally resolvable density at this resolution, or the prior is too restrictive to
+    reach whatever remains. The atomic representability benchmark distinguishes these: a prior
+    that charges heavily for elementary refinement directions is in the second case.
+  \item \textbf{\Rfree\ falls while \Rwork\ is unchanged.} Unlikely, and would warrant
+    scrutiny of the nuisance scaling and the split before being taken at face value.
+\end{enumerate}
+
+We also expect the information spectrum to be strongly rank-deficient relative to the voxel
+count: the number of density directions the data constrain should be far smaller than the
+number of voxels, and the leading modes should be spatially coherent. A spectrum that is not
+rank-deficient would indicate that the band limit or the prior normalization is wrong.
+
+An outcome in which the inferred density is coherent but corresponds to no atomic or
+physical template is not a failure. It is the outcome the formulation exists to make
+visible, and it would be described rather than reparameterized away.
+
+\section{Results}
+\label{sec:results}
+\textit{No experiments have been run. The subsections below are placeholders, to be
+populated from the machine-readable artifacts named in each case. Until then, this section
+contains no findings.}
+
+\subsection{Numerical gates}
+\textit{To be populated from \texttt{rho0\_check.json}, \texttt{fft\_check.json} and
+\texttt{derivative\_check.json}.} Report the starting-density electron-count and amplitude
+errors, the FFT relative error under the expected relation, the finite-difference and
+adjoint relative errors, the accelerator model and the working precision.
+
+\subsection{Prior comparison}
+\textit{To be populated from the candidate \texttt{fit/metrics.json} files and
+\texttt{selected.selection.json}.} Report the predeclared candidate table, the tuning
+likelihood, the tuning $R$, iteration counts, and the atomic representability metrics per
+perturbation kind.
+
+\subsection{Final work-set refinement}
+\textit{To be populated from \texttt{final/fit/metrics.json}.} Report baseline and field
+\Rwork, objective components, convergence, and density-correction statistics.
+
+\subsection{One-shot held-out evaluation}
+\textit{To be populated from \texttt{FREE\_EVALUATION.json}, only after the model lock.}
+Report $R_{\mathrm{work}}^{\mathrm{atomic}}$, $R_{\mathrm{work}}^{\mathrm{field}}$,
+$R_{\mathrm{free}}^{\mathrm{atomic}}$, $R_{\mathrm{free}}^{\mathrm{field}}$, both gaps, the
+three differences, and whether the held-out set was deposited or hash-derived.
+
+\subsection{Information spectrum}
+\textit{To be populated from \texttt{info\_spectrum.json}.} Report the leading $\lambda_i$,
+the effective-dimension lower bound, the information lower bound, and representative
+real-space modes.
+
+\section{Discussion}
+The central methodological distinction is between increasing flexibility and discovering density supported by independent diffraction data. A voxelized or field representation has vastly greater capacity than an atomic model and will almost inevitably reduce work-set discrepancy if insufficiently constrained. For this reason, the present framework treats simultaneous improvement of a genuinely untouched free set as a primary scientific result rather than a secondary quality statistic.
+
+The method is complementary to atomic refinement rather than a replacement for it. Atomic models efficiently encode chemistry and provide a highly informative starting density. Field refinement asks what remains after that representation has reached a strong local optimum. The most interesting inferred components are therefore density variations that are both experimentally visible and difficult to express by conventional coordinates, occupancies, and displacement parameters.
+
+The formulation is also deliberately more permissive than a physical-mode model. Restricting the correction to rigid-group, libration or normal-mode densities would produce more interpretable output and would answer a different question: whether a chosen dictionary explains the residual, rather than whether the data support density outside the atomic model class at all. A later formulation can add such a dictionary alongside a retained generic correlated residual, in which case the relative magnitude of the two components becomes the reportable quantity. It must not replace the generic component.
+
+The associated diffuse-scattering data for 6O2H provide a natural second-stage problem. Bragg diffraction constrains the mean periodic density, whereas diffuse intensity contains information about fluctuations around the mean \cite{meisburger2020}. A future version will use the frozen Bragg-derived mean field as the reference state for a separate covariance/fluctuation likelihood. No diffuse observations are used in the present refinement.
+
+\section{Reproducibility}
+The implementation is distributed as a functional Python package with a declarative YAML configuration, `uv` environment management, Ruff linting/formatting, pytest suites, GitHub Actions CI, and SLURM job definitions for every accelerator-scale operation. Crystallographic I/O and model-to-density conversion use GEMMI and reciprocalspaceship. Heavy numerical stages are submitted as dependency-tracked SLURM jobs and write machine-readable JSON/NPZ artifacts used to populate Section~\ref{sec:results}. Every job resolves repository paths through the submission directory rather than the staged script location, and every accelerator job initialises its own CUDA runtime, so a batch job does not depend on an interactive session's environment. The automated dependency chain terminates at the model lock; the held-out evaluation is a separate, manual, one-shot invocation.
+
+\begin{thebibliography}{99}
+
+\bibitem{brunger1992}
+A. T. Brunger, ``Free R value: a novel statistical quantity for assessing the accuracy of crystal structures,'' \textit{Nature}, 355, 472--475 (1992). DOI: 10.1038/355472a0.
+
+\bibitem{holton2014}
+J. M. Holton, S. Classen, K. A. Frankel, and J. A. Tainer, ``The R-factor gap in macromolecular crystallography: an untapped potential for insights on accurate structures,'' \textit{FEBS Journal}, 281, 4046--4060 (2014). DOI: 10.1111/febs.12922.
+
+\bibitem{meisburger2020}
+S. P. Meisburger, D. A. Case, and N. Ando, ``Diffuse X-ray scattering from correlated motions in a protein crystal,'' \textit{Nature Communications}, 11, 1271 (2020). DOI: 10.1038/s41467-020-14933-6.
+
+\bibitem{wojdyr2022}
+M. Wojdyr, ``GEMMI: A library for structural biology,'' \textit{Journal of Open Source Software}, 7, 4200 (2022). DOI: 10.21105/joss.04200.
+
+\bibitem{greisman2021}
+J. B. Greisman, K. M. Dalton, and D. R. Hekstra, ``reciprocalspaceship: a Python library for crystallographic data analysis,'' \textit{Journal of Applied Crystallography}, 54, 1521--1529 (2021). DOI: 10.1107/S160057672100755X.
+
+\bibitem{jax2018}
+J. Bradbury et al., ``JAX: composable transformations of Python+NumPy programs,'' software (2018). \url{https://github.com/jax-ml/jax}.
+
+\bibitem{deepmind2020}
+DeepMind and contributors, ``The DeepMind JAX Ecosystem: Optax,'' software (2020). \url{https://github.com/google-deepmind/optax}.
+
+\end{thebibliography}
+\end{document}

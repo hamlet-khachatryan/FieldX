@@ -26,6 +26,19 @@ DATA_ROOT_OPTION = typer.Option(None, help="Where datasets live; defaults to $FI
 RUNS_ROOT_OPTION = typer.Option(None, help="Where runs live; defaults to $FIELDX_RUNS_ROOT or ./runs")
 CONFIG_OUT_OPTION = typer.Option(None, help="Config path; defaults to configs/<pdbid>/default.yaml")
 FORCE_OPTION = typer.Option(False, "--force", help="Regenerate an existing config and prior grid")
+SIGMA_A_OPTION = typer.Option(
+    "work",
+    "--sigma-a-from",
+    help="Reflections used to estimate sigma-A weights: 'work' (safe, slightly biased) or "
+    "'free' (unbiased, permitted only after the one-shot free evaluation has happened).",
+)
+SIGMA_A_BINS_OPTION = typer.Option(20, "--sigma-a-bins", help="Resolution shells for sigma-A estimation.")
+PDB_IDS_ARGUMENT = typer.Argument(..., metavar="PDBID...", help="One or more four-character PDB identifiers")
+FAIL_FAST_OPTION = typer.Option(
+    False,
+    "--fail-fast",
+    help="Stop at the first failed entry. By default the batch continues and every failure is reported.",
+)
 NO_FREE_SET_OPTION = typer.Option(
     False,
     "--no-free-set",
@@ -54,17 +67,35 @@ def config_check(config: Path):
 
 @app.command("init-pdb")
 def init_pdb(
-    pdb_id: str,
+    pdb_ids: list[str] = PDB_IDS_ARGUMENT,
     data_root: Path | None = DATA_ROOT_OPTION,
     runs_root: Path | None = RUNS_ROOT_OPTION,
     config_out: Path | None = CONFIG_OUT_OPTION,
     force: bool = FORCE_OPTION,
     no_free_set: bool = NO_FREE_SET_OPTION,
+    fail_fast: bool = FAIL_FAST_OPTION,
 ):
-    """Download a PDB entry and write its configuration and dataset-specific prior grid."""
-    from crystal_field.dataset_init import init_pdb_dataset
+    """Download one or more PDB entries and write their configs and prior grids.
 
-    print(json.dumps(init_pdb_dataset(pdb_id, data_root, runs_root, config_out, force, no_free_set), indent=2))
+    Identifiers are all validated before anything is downloaded. One entry failing does
+    not stop the others: the batch continues and every failure is reported at the end,
+    with a non-zero exit code. Pass --fail-fast to stop at the first one instead.
+    """
+    from crystal_field.dataset_init import init_pdb_dataset, init_pdb_datasets
+
+    if config_out is not None:
+        if len(pdb_ids) != 1:
+            raise typer.BadParameter(
+                f"--config-out names a single file but {len(pdb_ids)} identifiers were given; "
+                "omit it to write configs/<pdbid>/default.yaml for each."
+            )
+        print(json.dumps(init_pdb_dataset(pdb_ids[0], data_root, runs_root, config_out, force, no_free_set), indent=2))
+        return
+
+    report = init_pdb_datasets(pdb_ids, data_root, runs_root, force, no_free_set, fail_fast)
+    print(json.dumps(report, indent=2))
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -221,6 +252,16 @@ def fit_map(config: Path):
     result = run_map_fit(cfg, arrays, objective, metrics, density)
     write_fit_map(cfg)
     print(json.dumps(result, indent=2))
+
+
+@app.command("export-maps")
+def export_maps_cmd(config: Path, sigma_a_from: str = SIGMA_A_OPTION, n_bins: int = SIGMA_A_BINS_OPTION):
+    """Write the CCP4 map set: starting, inferred, refined, 2Fo-Fc and 2mFo-DFc."""
+    cfg = _cfg(config)
+    _configure(cfg)
+    from crystal_field.maps import export_maps
+
+    print(json.dumps(export_maps(cfg, sigma_a_from=sigma_a_from, n_bins=n_bins), indent=2))
 
 
 @app.command("expand-priors")

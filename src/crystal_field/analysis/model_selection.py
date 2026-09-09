@@ -3,16 +3,88 @@ from __future__ import annotations
 import copy
 import datetime
 import hashlib
+import itertools
 import json
 from pathlib import Path
 
 import yaml
 
 from crystal_field.config import AppConfig, dump_config, load_config
+from crystal_field.model.prior import effective_parameters
 
 
 def _slug(value):
     return str(value).replace(".", "p").replace("-", "m").replace(" ", "_")
+
+
+# Axes a sweep may vary. multiscale_matern is excluded: its behaviour is set by a list
+# of components, which is not a scalar axis, so it belongs under `candidates:`.
+SWEEPABLE = (
+    "kernel",
+    "tau_density",
+    "correlation_length_angstrom",
+    "alpha",
+    "latent_distribution",
+    "student_t_df",
+    "laplace_softening",
+    "cauchy_scale",
+)
+
+KERNEL_ABBREVIATION = {"matern": "matern", "squared_exponential": "rbf", "bandlimited_white": "white"}
+
+# Each candidate is an independent GPU job, so an unconstrained product is a way to
+# accidentally queue hundreds of them. Exceeding this requires saying so in the grid file.
+DEFAULT_MAX_CANDIDATES = 64
+
+
+def _sweep_name(effective: dict) -> str:
+    parts = [KERNEL_ABBREVIATION.get(effective["kernel"], effective["kernel"])]
+    for key, prefix in (
+        ("tau_density", "t"),
+        ("correlation_length_angstrom", "l"),
+        ("alpha", "a"),
+    ):
+        if effective.get(key) is not None:
+            parts.append(f"{prefix}{_slug(effective[key])}")
+    if effective["latent_distribution"] != "gaussian":
+        parts.append(effective["latent_distribution"])
+    return "_".join(parts)
+
+
+def expand_sweep(sweep: dict, base_prior: dict) -> list[dict]:
+    """Cartesian product over the declared axes, minus combinations that mean the same.
+
+    alpha does nothing for a squared-exponential kernel, correlation length does nothing
+    for band-limited white noise, and student_t_df does nothing under a Gaussian latent.
+    Combinations differing only in such an inert parameter describe one operator and are
+    collapsed to a single candidate, so "compute every mode" does not mean "fit the same
+    prior repeatedly".
+    """
+    unknown = sorted(set(sweep) - set(SWEEPABLE))
+    if unknown:
+        raise ValueError(f"Cannot sweep {unknown}; sweepable axes are {list(SWEEPABLE)}")
+    axes = {key: (value if isinstance(value, list) else [value]) for key, value in sweep.items()}
+    for key, values in axes.items():
+        if not values:
+            raise ValueError(f"Sweep axis {key!r} is empty")
+
+    keys = list(axes)
+    candidates, seen = [], set()
+    for combination in itertools.product(*(axes[key] for key in keys)):
+        override = dict(zip(keys, combination, strict=True))
+        prior = {**base_prior, **override}
+        if prior.get("kernel") == "multiscale_matern":
+            raise ValueError(
+                "multiscale_matern cannot be swept: it is defined by a component list. "
+                "Give it explicitly under `candidates:`."
+            )
+        effective = effective_parameters(prior)
+        signature = json.dumps(effective, sort_keys=True)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        candidates.append({"name": _sweep_name(effective), "prior": effective})
+    return candidates
 
 
 def expand_prior_grid(base_config: Path, grid_file: Path, output_dir: Path):
@@ -21,10 +93,21 @@ def expand_prior_grid(base_config: Path, grid_file: Path, output_dir: Path):
     grid_path = Path(grid_file)
     if not grid_path.is_file():
         raise FileNotFoundError(f"Prior grid not found: {grid_path}")
-    spec = yaml.safe_load(grid_path.read_text())
-    candidates = (spec or {}).get("candidates", [])
+    spec = yaml.safe_load(grid_path.read_text()) or {}
+    candidates = list(spec.get("candidates", []) or [])
+    base_prior = base.prior.model_dump(mode="json")
+    if spec.get("sweep"):
+        candidates += expand_sweep(spec["sweep"], base_prior)
     if not candidates:
-        raise ValueError(f"{grid_path} contains no candidates")
+        raise ValueError(f"{grid_path} contains no candidates and no sweep")
+
+    limit = int(spec.get("max_candidates", DEFAULT_MAX_CANDIDATES))
+    if len(candidates) > limit:
+        raise ValueError(
+            f"{grid_path} expands to {len(candidates)} candidates, above max_candidates={limit}. "
+            "Each candidate is an independent GPU job. Narrow the sweep, or raise "
+            "max_candidates in the grid file deliberately."
+        )
     names = [item.get("name") for item in candidates if item.get("name")]
     if len(set(names)) != len(names):
         raise ValueError(f"{grid_path} has duplicate candidate names: {sorted(names)}")
@@ -48,7 +131,15 @@ def expand_prior_grid(base_config: Path, grid_file: Path, output_dir: Path):
         cfg = AppConfig.model_validate(payload)
         path = output_dir / f"{i:03d}_{_slug(name)}.yaml"
         dump_config(cfg, path)
-        manifest.append({"index": i, "name": name, "config": str(path), "output_dir": str(cfg.run.output_dir)})
+        manifest.append(
+            {
+                "index": i,
+                "name": name,
+                "config": str(path),
+                "output_dir": str(cfg.run.output_dir),
+                "prior": effective_parameters(cfg.prior),
+            }
+        )
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
     return {"n_candidates": len(manifest), "manifest": str(manifest_path)}
@@ -64,7 +155,14 @@ def select_prior(base_config: Path, manifest_path: Path, selected_path: Path):
             raise FileNotFoundError(f"Missing candidate metrics: {metrics_path}")
         m = json.loads(metrics_path.read_text())
         score = float(m["chi2_tune"]) / max(float(m["n_tune"]), 1.0)
-        rows.append({**item, "score": score, "r_tune": float(m["r_tune"]), "r_train": float(m["r_train"])})
+        rows.append(
+            {
+                **item,
+                "score": score,
+                "r_tune": float(m["r_tune"]),
+                "r_train": float(m["r_train"]),
+            }
+        )
     rows.sort(key=lambda x: (x["score"], x["r_tune"]))
     winner = rows[0]
     winner_cfg = load_config(winner["config"])

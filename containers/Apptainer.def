@@ -1,0 +1,31 @@
+# Optional container image. The normal DLS workflow is `module load cuda` plus the
+# repository .venv under SLURM; Apptainer is an alternative, never a requirement.
+#
+# Build on a site that permits container creation, then set CFI_APPTAINER_IMAGE (and
+# optionally CFI_APPTAINER_BINDS) before submitting. slurm/common.sh routes run_cfi and
+# run_uv through `apptainer exec --nv` when that variable is set.
+#
+# Select the accelerator extra that matches the host driver: cuda12 or cuda13.
+# uv.lock must be present; dependency resolution never happens at build or run time.
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    . /opt/fieldx
+
+%post
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates git
+    apt-get clean
+    python -m pip install --no-cache-dir uv==0.10.0
+    cd /opt/fieldx
+    UV_PROJECT_ENVIRONMENT=/opt/fieldx/.venv uv sync --locked --extra cuda13 --no-dev --no-editable
+
+%environment
+    export PATH=/opt/fieldx/.venv/bin:$PATH
+    export PYTHONUNBUFFERED=1
+    export XLA_PYTHON_CLIENT_PREALLOCATE=true
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+
+%runscript
+    exec fieldrefine "$@"

@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: FieldX
+message: "If you use this software, please cite the software release and the associated method paper."
+type: software
+version: 0.3.0
+date-released: 2026-09-08
+license: BSD-3-Clause
+repository-code: "https://github.com/YOUR-ORG/FieldX"
+abstract: >-
+  Direct refinement of experimental crystallographic density starting from an already
+  refined atomistic model, using a spatially correlated, band-limited density-field
+  correction inferred from Bragg observations.
+keywords:
+  - crystallography
+  - electron density
+  - Bayesian inference
+  - JAX
+  - Gemmi

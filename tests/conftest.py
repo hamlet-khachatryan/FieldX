@@ -242,3 +242,33 @@ def write_sf_cif(mtz_path, out_path):
     ]
     out_path.write_text(converter.write_cif_to_string(gemmi.read_mtz_file(str(mtz_path))))
     return out_path
+
+
+def write_multi_dataset_mtz(path, datasets, cell=CELL, spacegroup=SPACEGROUP, seed=0):
+    """An MTZ carrying several datasets, as MAD/SAD files do.
+
+    `datasets` is a list of (dataset_name, wavelength, {label: type}). Labels may repeat
+    across datasets -- that reuse is exactly what makes implicit selection unsafe.
+    Returns (path, {(dataset_name, label): first_value}) so tests can assert which
+    dataset's numbers came back.
+    """
+    import gemmi
+
+    mtz = gemmi.Mtz(with_base=True)
+    mtz.spacegroup = gemmi.SpaceGroup(spacegroup)
+    mtz.set_cell_for_all(gemmi.UnitCell(*cell))
+    hkl = np.array([[h, k, m] for h in range(1, 6) for k in range(1, 6) for m in range(1, 6)], dtype=float)
+    rng = np.random.default_rng(seed)
+
+    columns, truth = [], {}
+    for name, wavelength, labels in datasets:
+        dataset = mtz.add_dataset(name)
+        dataset.wavelength = wavelength
+        for label, mtz_type in labels.items():
+            mtz.add_column(label, mtz_type, dataset_id=dataset.id)
+            values = rng.random(len(hkl)) * 100 if mtz_type != "I" else (rng.random(len(hkl)) < 0.1).astype(float)
+            columns.append(values)
+            truth[(name, label)] = float(values[0])
+    mtz.set_data(np.hstack([hkl, np.column_stack(columns)]))
+    mtz.write_to_file(str(path))
+    return path, truth

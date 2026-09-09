@@ -271,3 +271,43 @@ def test_prior_candidates_are_submitted_as_an_array():
     text = (ROOT / "scripts/submit.sh").read_text()
     assert '--array="0-$((N-1))%$LIMIT"' in text
     assert "CFI_ARRAY_LIMIT" in text
+
+
+def test_dls_cuda_init_points_xla_at_the_site_toolkit(tmp_path):
+    """The ptxas fix, pinned.
+
+    XLA prefers the ptxas bundled in the pip CUDA wheels, which fails with "ptxas too
+    old" when it predates the GPU. The site init must redirect XLA at the toolkit that
+    `module load cuda` provides.
+    """
+    fake = tmp_path / "cuda"
+    (fake / "bin").mkdir(parents=True)
+    ptxas = fake / "bin" / "ptxas"
+    ptxas.write_text("#!/bin/sh\necho 'release 13.4, V13.4.0'\n")
+    ptxas.chmod(0o755)
+
+    script = (
+        f'export CUDA_HOME="{fake}"; source "{ROOT}/slurm/dls/cuda.sh"; echo "FLAGS=$XLA_FLAGS"; echo "DIR=$CUDA_DIR"'
+    )
+    result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, cwd=str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert f"FLAGS=--xla_gpu_cuda_data_dir={fake}" in result.stdout
+    assert f"DIR={fake}" in result.stdout
+
+
+def test_dls_cuda_init_survives_a_host_with_no_toolkit(tmp_path):
+    """Off-cluster it must warn and continue, not abort a job."""
+    script = (
+        f'unset CUDA_HOME CUDA_ROOT CUDA_PATH CUDA_DIR; PATH=/nonexistent; source "{ROOT}/slurm/dls/cuda.sh"; echo DONE'
+    )
+    result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, cwd=str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert "DONE" in result.stdout
+    assert "ptxas too old" in result.stderr or "no CUDA toolkit" in result.stderr
+
+
+def test_cuda_init_is_only_referenced_through_the_override():
+    """slurm/common.sh must honour FIELDX_CUDA_INIT so other sites can substitute one."""
+    text = (ROOT / "slurm/common.sh").read_text()
+    assert "FIELDX_CUDA_INIT" in text
+    assert "slurm/dls/cuda.sh" in text

@@ -17,3 +17,4 @@ fieldx_load_cuda
 run_cfi device-report
 run_cfi derivative-check
 run_cfi fit-map
+run_cfi export-maps

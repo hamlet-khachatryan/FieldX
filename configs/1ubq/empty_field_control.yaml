@@ -1,0 +1,101 @@
+# 1UBQ CAPACITY CONTROL -- refinement from an empty cell.
+#
+# This is NOT a phasing method and NOT a competing model. With amplitudes alone the
+# problem is phase-degenerate, so this run cannot recover the structure. Its purpose is
+# to calibrate the main experiment: it measures how far the field class can drive R_work
+# down using no structural information at all.
+#
+# Read it against runs/1UBQ:
+#   r_train comparable to the model start  -> R_work alone proves nothing
+#   r_tune far worse than the model start  -> the model start carries real information
+#
+# Judge it on the TUNE subset only (fit_scope: train). Do not run evaluate-free here:
+# the control is a diagnostic, and spending a free-set read on it buys nothing.
+#
+#   scripts/submit.sh configs/1ubq/empty_field_control.yaml
+run:
+  output_dir: ../../runs/1UBQ_empty_control
+  seed: 20260907
+  enable_x64: false
+
+input:
+  reflections: ../../data/1ubq/1ubq-sf.cif
+  model: ../../data/1ubq/1ubq.cif      # read only to verify cell and space group
+  scattering: xray
+  observation_kind: amplitude
+  columns:
+    observation: FP
+    sigma: SIGFP
+    free: FreeR_flag
+  free_test_value: null
+  expected_free_fraction_min: 0.02
+  expected_free_fraction_max: 0.15
+
+split:
+  strategy: hash
+  tune_fraction_of_work: 0.10
+  final_fraction_if_hash: 0.10
+  pair_friedel_when_nonanomalous: true
+  anomalous: false
+
+resolution:
+  d_min_angstrom: 1.8035861253738403
+  d_max_angstrom: 32.7287712097168
+
+grid:
+  shape: null
+  samples_per_dmin: 3.0
+
+prior:
+  # Identical to the main experiment: the only difference must be the starting density.
+  kernel: matern
+  tau_density: 0.040
+  correlation_length_angstrom: 0.75
+  alpha: 2.5
+  components: []
+  remove_mean: true
+  latent_distribution: gaussian
+  student_t_df: 4.0
+  laplace_softening: 1.0e-3
+  cauchy_scale: 1.0
+
+baseline:
+  starting_density: zero
+  density_cutoff: 1.0e-6
+  bulk_solvent:
+    enabled: false          # no model density to mask against
+  scaling:
+    enabled: false          # a zero density has no scale to fit
+
+likelihood:
+  global_scale: profile     # the only remaining source of scale
+  fixed_scale: 1.0
+  sigma_floor: 1.0e-6
+  loss: gaussian
+  student_t_df: 6.0
+
+optimizer:
+  method: lbfgs
+  fit_scope: train
+  init: random              # the gradient at z=0 is NaN when rho0=0
+  init_scale: 1.0
+  max_iterations: 100
+  tolerance: 5.0e-5
+  lbfgs_memory: 8
+  adam_learning_rate: 3.0e-3
+  checkpoint_every: 10
+  validation_patience: 8
+  validation_min_delta: 1.0e-5
+
+information:
+  n_modes: 8
+  max_iterations: 80
+  tolerance: 1.0e-4
+  memory_budget_gib: 40.0
+
+atomic_benchmark:
+  enabled: false            # there is no starting model density to perturb
+  n_atoms: 8
+  coordinate_delta_angstrom: 0.02
+  b_delta_angstrom2: 0.5
+  occupancy_delta: 0.02

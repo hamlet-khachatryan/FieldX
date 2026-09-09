@@ -2,6 +2,57 @@ from __future__ import annotations
 
 import math
 
+# Parameters that actually reach the transfer operator, per kernel and per latent
+# distribution. Anything else is inert: sweeping it produces identical operators, and
+# recording it in a result would imply a dependence that does not exist.
+KERNEL_PARAMETERS = {
+    "matern": ("tau_density", "correlation_length_angstrom", "alpha"),
+    "squared_exponential": ("tau_density", "correlation_length_angstrom"),
+    "bandlimited_white": ("tau_density",),
+    "multiscale_matern": ("tau_density", "components"),
+}
+
+LATENT_PARAMETERS = {
+    "gaussian": (),
+    "student_t": ("student_t_df",),
+    "laplace": ("laplace_softening",),
+    "cauchy": ("cauchy_scale",),
+}
+
+
+def effective_parameters(prior) -> dict:
+    """The prior parameters that actually affect the field, in canonical order.
+
+    `prior` may be a PriorConfig or a plain dict. Used both to deduplicate a parameter
+    sweep -- two combinations differing only in an inert parameter describe the same
+    operator -- and to record what a result actually depended on.
+    """
+    get = prior.get if isinstance(prior, dict) else lambda key, default=None: getattr(prior, key, default)
+    kernel = get("kernel", "matern")
+    latent = get("latent_distribution", "gaussian")
+    if kernel not in KERNEL_PARAMETERS:
+        raise ValueError(f"Unknown prior kernel: {kernel}")
+    if latent not in LATENT_PARAMETERS:
+        raise ValueError(f"Unknown latent prior: {latent}")
+
+    effective = {"kernel": kernel}
+    for name in KERNEL_PARAMETERS[kernel]:
+        value = get(name)
+        if name == "components" and value is not None:
+            value = [
+                {
+                    k: (component.get(k) if isinstance(component, dict) else getattr(component, k))
+                    for k in ("correlation_length_angstrom", "alpha", "weight")
+                }
+                for component in value
+            ]
+        effective[name] = value
+    effective["remove_mean"] = get("remove_mean", True)
+    effective["latent_distribution"] = latent
+    for name in LATENT_PARAMETERS[latent]:
+        effective[name] = get(name)
+    return effective
+
 
 def _frequency_axis(n, dtype):
     import jax.numpy as jnp

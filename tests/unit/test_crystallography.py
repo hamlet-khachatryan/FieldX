@@ -11,64 +11,158 @@ from crystal_field.crystallography.density import (
 )
 from crystal_field.crystallography.geometry import (
     cell_tuple,
-    direct_metric_from_parameters,
-    reciprocal_metric_from_parameters,
 )
 from crystal_field.crystallography.symmetry import symmetry_arrays
 
-SPACE_GROUPS = ["P 1", "P 21 21 21", "P 41", "C 2", "P 63", "I 4", "R 3 :H", "F 4 3 2"]
-
-
-def test_orthogonal_reciprocal_metric():
-    g = reciprocal_metric_from_parameters(10, 20, 40, 90, 90, 90)
-    np.testing.assert_allclose(g, np.diag([1 / 100, 1 / 400, 1 / 1600]), atol=1e-12)
-
-
-@pytest.mark.parametrize(
-    "cell",
-    [(10, 20, 40, 90, 90, 90), (30, 30, 45, 90, 90, 120), (23.1, 27.4, 31.9, 78.2, 84.5, 69.7)],
-)
-def test_metric_tensors_are_mutual_inverses(cell):
-    direct = direct_metric_from_parameters(*cell)
-    reciprocal = reciprocal_metric_from_parameters(*cell)
-    np.testing.assert_allclose(direct @ reciprocal, np.eye(3), atol=1e-10)
-
-
-@pytest.mark.parametrize(
-    "cell",
-    [(10, 20, 40, 90, 90, 90), (30, 30, 45, 90, 90, 120), (23.1, 27.4, 31.9, 78.2, 84.5, 69.7)],
-)
-@pytest.mark.parametrize("hkl", [(1, 0, 0), (2, -3, 1), (0, 4, -5)])
-def test_reciprocal_metric_reproduces_gemmi_resolution(cell, hkl):
-    """h^T G* h is 1/d^2 for the same Miller index, which is what the prior consumes."""
-    g = reciprocal_metric_from_parameters(*cell)
-    h = np.asarray(hkl, dtype=np.float64)
-    assert float(h @ g @ h) == pytest.approx(gemmi.UnitCell(*cell).calculate_1_d2(hkl), rel=1e-10)
-
-
-def test_cell_tuple_round_trips_through_gemmi():
-    values = (23.1, 27.4, 31.9, 78.2, 84.5, 69.7)
-    assert cell_tuple(gemmi.UnitCell(*values)) == pytest.approx(values)
+# Every crystal system and every lattice centring (P, A, C, I, F, R), plus both
+# rhombohedral settings. Symmetry bugs hide in the centred and trigonal groups.
+SPACE_GROUPS = [
+    "P 1",
+    "P -1",  # triclinic
+    "P 21",
+    "C 2",
+    "C 2/c",  # monoclinic
+    "P 21 21 21",
+    "C 2 2 21",
+    "I 2 2 2",
+    "F 2 2 2",  # orthorhombic
+    "P 41",
+    "P 43 21 2",
+    "I 4",
+    "I 41/a",  # tetragonal
+    "P 31",
+    "R 3 :H",
+    "R 3 :R",
+    "R 32 :H",  # trigonal / rhombohedral
+    "P 63",
+    "P 63 2 2",  # hexagonal
+    "P 21 3",
+    "I 2 3",
+    "F 4 3 2",
+    "F m -3 m",  # cubic
+]
 
 
 @pytest.mark.parametrize("name", SPACE_GROUPS)
-def test_symmetry_arrays_are_integral_and_group_sized(name):
+def test_rotational_and_full_operator_counts_agree(name):
+    """symmetry_arrays() returns rotational operators; the full group adds centring."""
+    from crystal_field.crystallography.symmetry import centring_translations, group_order
+
     sg = gemmi.SpaceGroup(name)
     rotations, translations = symmetry_arrays(sg)
-    assert rotations.shape == (len(sg.operations()), 3, 3)
-    assert translations.shape == (len(sg.operations()), 3)
+    full_rotations, _ = symmetry_arrays(sg, include_centring=True)
+    n_cen = len(centring_translations(sg))
+
+    assert rotations.shape == (len(list(sg.operations().sym_ops)), 3, 3)
+    assert translations.shape == (rotations.shape[0], 3)
+    assert full_rotations.shape[0] == group_order(sg) == rotations.shape[0] * n_cen
+
+
+@pytest.mark.parametrize("name", SPACE_GROUPS)
+def test_operators_are_integral_orthogonal_and_in_the_unit_cell(name):
+    rotations, translations = symmetry_arrays(gemmi.SpaceGroup(name), include_centring=True)
     assert rotations.dtype == np.int32
-    # Crystallographic rotations are orthogonal in fractional coordinates.
     for r in rotations:
         assert abs(round(float(np.linalg.det(r)))) == 1
     assert np.all((translations >= 0.0) & (translations < 1.0))
 
 
 @pytest.mark.parametrize("name", SPACE_GROUPS)
-def test_first_symmetry_operator_is_the_identity(name):
+def test_first_operator_is_the_identity(name):
     rotations, translations = symmetry_arrays(gemmi.SpaceGroup(name))
     np.testing.assert_array_equal(rotations[0], np.eye(3, dtype=np.int32))
     np.testing.assert_allclose(translations[0], np.zeros(3), atol=1e-12)
+
+
+@pytest.mark.parametrize("name", SPACE_GROUPS)
+def test_centring_factor_is_one_on_every_reflection_the_filter_keeps(name):
+    """The precondition that lets the projection drop centring operators.
+
+    (1/n_cen) sum_j exp(-2 pi i h.c_j) is always 0 or 1. It is 0 exactly for reflections
+    forbidden by the *lattice* centring -- not for every systematic absence, since glide
+    planes and screw axes forbid reflections through the rotational operators instead
+    (C 2/c and I 41/a have both kinds). What matters here is the converse: any reflection
+    that survives systematic_absences() has centring factor exactly 1, so on the filtered
+    set the centring operators contribute nothing.
+    """
+    from crystal_field.crystallography.symmetry import centring_translations
+
+    sg = gemmi.SpaceGroup(name)
+    centring = centring_translations(sg)
+    rng = np.random.default_rng(2)
+    hkls = rng.integers(-6, 7, size=(400, 3)).astype(np.int32)
+    factor = np.exp(-2j * np.pi * (hkls.astype(np.float64) @ centring.T)).mean(axis=1)
+
+    magnitude = np.abs(factor)
+    assert np.all(np.isclose(magnitude, 0.0, atol=1e-12) | np.isclose(magnitude, 1.0, atol=1e-12))
+
+    kept = ~sg.operations().systematic_absences(hkls)
+    np.testing.assert_allclose(factor[kept], 1.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("name", SPACE_GROUPS)
+def test_projection_without_centring_matches_the_full_group(name):
+    """The exactness claim, checked against the full-group projection itself."""
+    jnp = pytest.importorskip("jax.numpy")
+
+    from crystal_field.crystallography.symmetry import centring_translations
+    from crystal_field.forward.diffraction import symmetry_projected_fcalc
+
+    sg = gemmi.SpaceGroup(name)
+    rng = np.random.default_rng(5)
+    shape = (24, 24, 24)
+    fgrid = jnp.asarray(rng.standard_normal(shape) + 1j * rng.standard_normal(shape), dtype=jnp.complex64)
+    hkls = rng.integers(-6, 7, size=(400, 3)).astype(np.int32)
+
+    def project(indices, include_centring):
+        rotations, translations = symmetry_arrays(sg, include_centring=include_centring)
+        return np.asarray(
+            symmetry_projected_fcalc(
+                fgrid,
+                jnp.asarray(indices, dtype=jnp.int32),
+                jnp.asarray(rotations, dtype=jnp.int32),
+                jnp.asarray(translations, dtype=jnp.float32),
+            )
+        )
+
+    kept = hkls[~sg.operations().systematic_absences(hkls)]
+    assert len(kept) > 0
+    np.testing.assert_allclose(project(kept, False), project(kept, True), rtol=2e-5, atol=2e-5)
+
+    # On lattice-forbidden reflections the full group cancels to zero while the reduced
+    # projection does not -- which is exactly why the absence filter is a precondition.
+    centring = centring_translations(sg)
+    if len(centring) > 1:
+        factor = np.exp(-2j * np.pi * (hkls.astype(np.float64) @ centring.T)).mean(axis=1)
+        forbidden = hkls[np.abs(factor) < 0.5]
+        assert len(forbidden) > 0
+        np.testing.assert_allclose(project(forbidden, True), 0.0, atol=2e-5)
+        assert np.linalg.norm(project(forbidden, False)) > 1e-2, "the reduced projection needs the absence filter"
+
+
+@pytest.mark.parametrize(
+    ("name", "cell", "shape", "ok"),
+    [
+        ("P 41", (30, 30, 38, 90, 90, 90), (48, 48, 60), True),
+        ("P 41", (30, 30, 38, 90, 90, 90), (48, 54, 60), False),
+        ("P 63", (30, 30, 38, 90, 90, 120), (48, 48, 60), True),
+        ("P 63", (30, 30, 38, 90, 90, 120), (48, 54, 60), False),
+        ("P 21 21 21", (30, 34, 38, 90, 90, 90), (48, 54, 60), True),
+        ("F m -3 m", (40, 40, 40, 90, 90, 90), (48, 48, 48), True),
+        ("F m -3 m", (40, 40, 40, 90, 90, 90), (48, 54, 60), False),
+    ],
+)
+def test_grid_shape_is_validated_against_symmetry(name, cell, shape, ok):
+    """Gemmi requires equal sampling along symmetry-related axes; catch it in config."""
+    from crystal_field.crystallography.symmetry import validate_grid_shape
+
+    sg = gemmi.SpaceGroup(name)
+    unit_cell = gemmi.UnitCell(*cell)
+    if ok:
+        assert validate_grid_shape(shape, unit_cell, sg) == shape
+    else:
+        with pytest.raises(ValueError, match="incompatible with space group"):
+            validate_grid_shape(shape, unit_cell, sg)
 
 
 def test_systematic_absences_are_detected():

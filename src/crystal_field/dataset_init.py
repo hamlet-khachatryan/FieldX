@@ -98,6 +98,7 @@ def build_config_payload(entry: dict, refl: dict, runs_root: Path, no_free_set: 
                 "sigma": refl["sigma"],
                 "free": refl["free"],
             },
+            "mtz_dataset": (refl.get("mtz_selection") or {}).get("dataset_id"),
             "free_test_value": refl["free_test_value"] if has_free and not no_free_set else None,
             "expected_free_fraction_min": 0.02,
             "expected_free_fraction_max": 0.15,
@@ -165,6 +166,77 @@ def build_config_payload(entry: dict, refl: dict, runs_root: Path, no_free_set: 
             "b_delta_angstrom2": 0.5,
             "occupancy_delta": 0.02,
         },
+    }
+
+
+def init_pdb_datasets(
+    pdb_ids,
+    data_root: Path | None = None,
+    runs_root: Path | None = None,
+    force: bool = False,
+    no_free_set: bool = False,
+    fail_fast: bool = False,
+) -> dict:
+    """Initialise several PDB entries in one call.
+
+    Every identifier is validated and de-duplicated *before* anything is downloaded, so a
+    typo in the last argument does not cost four downloads first. Entries are then
+    processed one at a time, each isolated from the others: one entry failing -- most
+    often because it deposits no structure factors -- does not stop the others, and every
+    failure is collected and reported at the end. Pass `fail_fast` to stop at the first
+    one instead.
+
+    Downloads are sequential on purpose -- these are public RCSB endpoints, not a service
+    to parallelise against.
+    """
+    requested = list(pdb_ids)
+    if not requested:
+        raise ValueError("Give at least one PDB identifier")
+
+    # Guard 1: validate everything up front.
+    invalid, normalized = [], []
+    for raw in requested:
+        try:
+            normalized.append(normalize_pdb_id(raw))
+        except ValueError as exc:
+            invalid.append(f"{raw!r}: {exc}")
+    if invalid:
+        raise ValueError("Invalid PDB identifier(s) -- nothing was downloaded:\n  - " + "\n  - ".join(invalid))
+
+    # Guard 2: a repeated entry is a mistake, and would race on the same output paths.
+    duplicates = sorted({pdb_id for pdb_id in normalized if normalized.count(pdb_id) > 1})
+    if duplicates:
+        raise ValueError(
+            f"Repeated PDB identifier(s) {[d.upper() for d in duplicates]}; they would write to the same paths"
+        )
+
+    succeeded, failed, skipped = [], [], []
+    for index, pdb_id in enumerate(normalized):
+        try:
+            succeeded.append(
+                init_pdb_dataset(
+                    pdb_id,
+                    data_root=data_root,
+                    runs_root=runs_root,
+                    force=force,
+                    no_free_set=no_free_set,
+                )
+            )
+        except Exception as exc:
+            failed.append({"pdb_id": pdb_id.upper(), "error_type": type(exc).__name__, "error": str(exc)})
+            if fail_fast:
+                skipped = [p.upper() for p in normalized[index + 1 :]]
+                break
+
+    return {
+        "requested": [p.upper() for p in normalized],
+        "n_succeeded": len(succeeded),
+        "n_failed": len(failed),
+        "n_skipped": len(skipped),
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped_after_failure": skipped,
+        "ok": not failed,
     }
 
 

@@ -131,3 +131,45 @@ def build_functions(arrays, cfg):
         return result
 
     return transfer, density_from_z, predict_all, residuals_for_split, objective, metrics, free_metrics
+
+
+def build_complex_fcalc(arrays, cfg):
+    """Complex structure factors, for outputs that need phases rather than amplitudes.
+
+    build_functions() exposes |F| because that is what the likelihood consumes. Map
+    coefficients need the phase too, so this reproduces the same forward calculation and
+    returns F itself. The two are pinned together by a test asserting
+    abs(complex_fcalc(z)) == predict_all(z).
+    """
+    from crystal_field.forward.diffraction import (
+        fft_structure_factor_grid,
+        symmetry_projected_fcalc,
+    )
+    from crystal_field.model.prior import apply_transfer, build_transfer
+
+    transfer = build_transfer(
+        tuple(arrays.rho0.shape),
+        arrays.reciprocal_metric,
+        arrays.unit_cell_volume,
+        arrays.d_min_angstrom,
+        cfg.prior,
+        arrays.rho0.dtype,
+    )
+    solvent_f = symmetry_projected_fcalc(
+        fft_structure_factor_grid(arrays.solvent_mask, arrays.unit_cell_volume),
+        arrays.hkls,
+        arrays.symmetry_rotations,
+        arrays.symmetry_translations,
+    )
+
+    def correction(z):
+        return apply_transfer(z, transfer, arrays.unit_cell_volume)
+
+    def complex_fcalc(z):
+        fgrid = fft_structure_factor_grid(arrays.rho0 + correction(z), arrays.unit_cell_volume)
+        fcryst = symmetry_projected_fcalc(fgrid, arrays.hkls, arrays.symmetry_rotations, arrays.symmetry_translations)
+        if cfg.baseline.bulk_solvent.enabled:
+            fcryst = fcryst + arrays.solvent_scale * solvent_f
+        return arrays.overall_scale * fcryst
+
+    return complex_fcalc, correction

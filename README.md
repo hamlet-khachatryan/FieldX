@@ -91,6 +91,18 @@ uv run fieldrefine inspect      configs/1ubq/default.yaml
 uv run fieldrefine config-check configs/1ubq/default.yaml
 ```
 
+Several entries can be initialised at once:
+
+```bash
+uv run fieldrefine init-pdb 1UBQ 6O2H 3K0N
+```
+
+Identifiers are validated and de-duplicated **before** anything is downloaded, so a typo
+in the last argument costs nothing. One entry failing — most often because it deposits no
+structure factors — does not stop the others: the batch finishes and every failure is
+reported at the end. The command exits non-zero if any entry failed, so it still composes
+in a script. `--fail-fast` stops at the first failure instead.
+
 `init-pdb` works for any four-character PDB entry with deposited experimental Bragg
 structure factors. It downloads coordinates and structure factors from RCSB, detects the
 crystallographic metadata, reflection columns and free-flag convention, and writes both
@@ -223,6 +235,14 @@ into the checkout. This is enforced by `tests/unit/test_slurm_control_plane.py`.
 
 No production FFT optimization, information-spectrum solve or accelerator test is ever
 intended for a login node.
+
+## Maps
+
+Stage 60 writes `final/maps/`: the starting density, the inferred correction on its own,
+the refined total, and 2Fo-Fc / Fo-Fc maps with both FieldX and atomic-model phases.
+`maps.json` describes each one. Compare `2FoFc_field` against `2FoFc_atomic` — not
+against `refined.ccp4`, which is a calculated density and smooth by construction. See
+[`docs/WORKFLOW.md`](docs/WORKFLOW.md#looking-at-the-maps).
 
 ## Statistical barrier
 

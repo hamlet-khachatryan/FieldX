@@ -21,6 +21,9 @@ dependencies = [
   "typer>=0.15,<1",
   "rich>=13.9,<15",
   "h5py>=3.12,<4",
+  # Bessel functions for sigma-A figures of merit. Already a jax dependency, but
+  # crystal_field.analysis.sigmaa imports it directly, so it is declared here.
+  "scipy>=1.15,<2",
 ]
 
 [project.optional-dependencies]

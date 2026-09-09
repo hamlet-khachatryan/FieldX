@@ -8,7 +8,16 @@ import yaml
 from crystal_field.config import AppConfig, check_config, load_config, resolve_payload_paths
 
 ROOT = Path(__file__).resolve().parents[2]
-COMMITTED_CONFIGS = sorted(ROOT.glob("configs/**/*.yaml"))
+
+
+def _is_dataset_config(path):
+    """Dataset configs have a `run:` block; prior grids have `candidates:`/`sweep:`."""
+    payload = yaml.safe_load(path.read_text()) or {}
+    return "run" in payload and not {"candidates", "sweep"} & set(payload)
+
+
+COMMITTED_CONFIGS = sorted(p for p in ROOT.glob("configs/**/*.yaml") if _is_dataset_config(p))
+COMMITTED_GRIDS = sorted(p for p in ROOT.glob("configs/**/*.yaml") if not _is_dataset_config(p))
 
 
 def _base(tiny_dataset, **overrides):
@@ -18,7 +27,11 @@ def _base(tiny_dataset, **overrides):
     return payload
 
 
-@pytest.mark.parametrize("path", [p for p in COMMITTED_CONFIGS if p.name != "prior_grid.yaml"], ids=lambda p: p.name)
+def test_the_config_and_grid_split_is_not_empty():
+    assert COMMITTED_CONFIGS and COMMITTED_GRIDS
+
+
+@pytest.mark.parametrize("path", COMMITTED_CONFIGS, ids=lambda p: f"{p.parent.name}/{p.name}")
 def test_every_committed_config_validates(path):
     cfg = load_config(path)
     assert cfg.grid.samples_per_dmin == 3.0

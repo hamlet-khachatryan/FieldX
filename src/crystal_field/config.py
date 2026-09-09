@@ -65,6 +65,11 @@ class InputConfig(Strict):
     scattering: Literal["xray", "electron", "neutron"] = "xray"
     observation_kind: Literal["amplitude", "intensity"] = "amplitude"
     columns: ColumnConfig
+    # Which dataset inside a multi-dataset MTZ supplies the columns above: a dataset id
+    # or name. Required whenever the file carries several data-bearing datasets and the
+    # configured labels do not single one out (MAD/SAD wavelengths reuse labels).
+    # Reflection CIFs have no dataset concept and ignore this.
+    mtz_dataset: int | str | None = None
     free_test_value: int | None = None
     expected_free_fraction_min: float = Field(0.02, ge=0.0, le=1.0)
     expected_free_fraction_max: float = Field(0.10, ge=0.0, le=1.0)
@@ -184,6 +189,11 @@ class ScalingConfig(Strict):
 
 
 class BaselineConfig(Strict):
+    # "model" is the v3 experiment: refine a correction to the refined atomic density.
+    # "zero" starts from an empty cell and is a CAPACITY CONTROL, not a phasing method:
+    # with amplitudes alone the problem is phase-degenerate, so a low R_work reached this
+    # way measures how much the field class can fit without structural information.
+    starting_density: Literal["model", "zero"] = "model"
     density_cutoff: float = Field(1e-6, gt=0.0)
     bulk_solvent: BulkSolventConfig = Field(default_factory=BulkSolventConfig)
     scaling: ScalingConfig = Field(default_factory=ScalingConfig)
@@ -200,6 +210,10 @@ class LikelihoodConfig(Strict):
 class OptimizerConfig(Strict):
     method: Literal["lbfgs", "adam"] = "lbfgs"
     fit_scope: Literal["train", "work"] = "train"
+    # |F| is not differentiable at F = 0, so an empty starting density must not be
+    # optimized from z = 0: the gradient is NaN. "random" draws z ~ init_scale * N(0, I).
+    init: Literal["zero", "random"] = "zero"
+    init_scale: float = Field(1.0, gt=0.0)
     max_iterations: int = Field(300, ge=1)
     tolerance: float = Field(5e-5, gt=0.0)
     lbfgs_memory: int = Field(8, ge=1, le=50)
@@ -253,6 +267,21 @@ class AppConfig(Strict):
                 raise ValueError("input.free_test_value is required for existing_free_then_hash")
         if self.baseline.scaling.enabled and self.input.observation_kind != "amplitude":
             raise ValueError("Gemmi baseline scaling currently requires amplitude observations")
+        if self.baseline.starting_density == "zero":
+            # An empty cell makes the model-derived nuisance terms meaningless and the
+            # zero start numerically undefined. Require the experiment to say so
+            # explicitly rather than silently reinterpreting the configuration.
+            problems = []
+            if self.baseline.scaling.enabled:
+                problems.append("baseline.scaling.enabled must be false (a zero density has no scale to fit)")
+            if self.baseline.bulk_solvent.enabled:
+                problems.append("baseline.bulk_solvent.enabled must be false (there is no model to mask)")
+            if self.likelihood.global_scale != "profile":
+                problems.append("likelihood.global_scale must be 'profile' (it is the only source of scale)")
+            if self.optimizer.init != "random":
+                problems.append("optimizer.init must be 'random' (the gradient at z=0 is NaN when rho0=0)")
+            if problems:
+                raise ValueError("baseline.starting_density='zero' requires:\n  - " + "\n  - ".join(problems))
         if self.split.anomalous:
             raise ValueError(
                 "v3 models a real-valued mean density and does not support anomalous differences. "
@@ -309,6 +338,31 @@ def check_config(path: str | Path) -> dict:
         problems.append(f"input.diffuse_h5 does not exist: {cfg.input.diffuse_h5}")
     if cfg.split.strategy == "existing_free_then_hash" and not cfg.input.columns.free:
         problems.append("split.strategy=existing_free_then_hash needs input.columns.free")
+    # Crystallographic checks need the model's cell and space group, which is cheap to
+    # read and catches at submission time what would otherwise fail inside stage 20.
+    crystal = {}
+    if cfg.input.model.is_file():
+        import gemmi
+
+        from crystal_field.crystallography.symmetry import group_order, validate_grid_shape
+
+        structure = gemmi.read_structure(str(cfg.input.model))
+        spacegroup = gemmi.SpaceGroup(structure.spacegroup_hm) if structure.spacegroup_hm else None
+        if spacegroup is not None:
+            if not structure.cell.is_compatible_with_spacegroup(spacegroup):
+                problems.append(
+                    f"unit cell {structure.cell} is not metrically compatible with space group {spacegroup.xhm()}"
+                )
+            if cfg.grid.shape is not None:
+                try:
+                    validate_grid_shape(cfg.grid.shape, structure.cell, spacegroup)
+                except ValueError as exc:
+                    problems.append(str(exc))
+            crystal = {
+                "spacegroup": spacegroup.xhm(),
+                "symmetry_copies_in_cell": group_order(spacegroup),
+            }
+
     if problems:
         raise ValueError("Configuration is not usable:\n  - " + "\n  - ".join(problems))
     return {
@@ -320,10 +374,13 @@ def check_config(path: str | Path) -> dict:
         "d_min_angstrom": cfg.resolution.d_min_angstrom,
         "samples_per_dmin": cfg.grid.samples_per_dmin,
         "split_strategy": cfg.split.strategy,
+        "mtz_dataset": cfg.input.mtz_dataset,
         "has_free_set": cfg.has_free_set,
         "target": "R_work and R_free" if cfg.has_free_set else "R_work only (no held-out set)",
+        "starting_density": cfg.baseline.starting_density,
         "prior_kernel": cfg.prior.kernel,
         "latent_distribution": cfg.prior.latent_distribution,
         "fit_scope": cfg.optimizer.fit_scope,
+        **crystal,
         "ok": True,
     }

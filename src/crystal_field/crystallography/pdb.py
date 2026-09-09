@@ -96,13 +96,34 @@ def _pick(columns: dict, names) -> str | None:
     return next((columns[name] for name in names if name in columns), None)
 
 
-def discover_reflection_columns(reflection_path: str | Path) -> dict:
-    """Detect observation/sigma/free columns, resolution range and free-flag convention."""
+def discover_reflection_columns(reflection_path: str | Path, mtz_dataset=None) -> dict:
+    """Detect observation/sigma/free columns, resolution range and free-flag convention.
+
+    For a multi-dataset MTZ the dataset must be settled before columns mean anything: the
+    same label can name different wavelengths. Discovery therefore refuses to guess and
+    reports the available datasets instead.
+    """
     import reciprocalspaceship as rs
 
+    from crystal_field.crystallography.mtz import describe_mtz, is_mtz, read_mtz_dataset
+
     path = Path(reflection_path)
-    suffixes = "".join(path.suffixes).lower()
-    ds = rs.read_mtz(str(path)) if suffixes.endswith((".mtz", ".mtz.gz")) else rs.read_cif(str(path))
+    selection = None
+    if is_mtz(path):
+        described = describe_mtz(path)
+        candidates = described["data_datasets"]
+        if mtz_dataset is None and len(candidates) > 1:
+            summary = "; ".join(
+                f"id={d['id']} {d['dataset_name']!r} wavelength={d['wavelength']:.5g}" for d in candidates
+            )
+            raise ValueError(
+                f"{path} contains {len(candidates)} data-bearing datasets: {summary}. "
+                "Pass mtz_dataset (an id or name) to say which one to configure."
+            )
+        # No labels are known yet, so resolution rests on the dataset alone.
+        ds, selection = read_mtz_dataset(path, [], mtz_dataset)
+    else:
+        ds = rs.read_cif(str(path))
     columns = {str(column).upper(): str(column) for column in ds.columns}
 
     observation = _pick(columns, AMPLITUDE_NAMES)
@@ -149,4 +170,5 @@ def discover_reflection_columns(reflection_path: str | Path) -> dict:
         "cell": [ds.cell.a, ds.cell.b, ds.cell.c, ds.cell.alpha, ds.cell.beta, ds.cell.gamma],
         "n_reflections": len(ds),
         "merged": bool(ds.merged),
+        "mtz_selection": selection,
     }

@@ -56,8 +56,18 @@ export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$PROJECT_ROOT/.venv}"
 [[ -z "${FIELDX_UV_PYTHON_DIR:-}" ]] || export UV_PYTHON_INSTALL_DIR="$FIELDX_UV_PYTHON_DIR"
 
 export PYTHONUNBUFFERED=1
-export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-true}"
-export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.90}"
+# Preallocation is OFF by default. Reserving most of the device up front leaves CUDA no
+# room outside the arena to load compiled modules, which fails as
+#
+#   RESOURCE_EXHAUSTED: Failed to load in-memory CUBIN (compiled for a different GPU?):
+#   CUDA_ERROR_OUT_OF_MEMORY [executable_name='jit_copy']
+#
+# even when the problem itself needs a fraction of a GiB. FieldX grids are modest and
+# `fieldrefine estimate-memory` sizes them in advance, so on-demand allocation is the
+# safer default. Turn it back on with a fraction that leaves headroom (0.7-0.8) if a
+# large information solve fragments memory.
+export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.80}"
 export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-${FIELDX_JAX_CACHE:-$PROJECT_ROOT/.jax-cache}}"
 mkdir -p "$JAX_COMPILATION_CACHE_DIR"
 

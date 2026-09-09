@@ -1,0 +1,39 @@
+# Second-pass parameter sweep for 1UBQ. NOT the pilot grid.
+#
+# Run configs/1ubq/prior_grid.yaml first: four candidates, Gaussian only, testing the v3
+# formulation without confounding it. Use this afterwards, once the dataset is known to
+# behave, to map the prior parameter space:
+#
+#   scripts/submit.sh configs/1ubq/default.yaml configs/1ubq/prior_sweep.yaml
+#
+# `sweep:` takes the Cartesian product of the declared axes. Combinations that differ
+# only in a parameter the kernel or latent distribution ignores describe the same
+# operator and are collapsed, so alpha is not swept against squared_exponential and
+# correlation length is not swept against band-limited white noise.
+#
+# Every candidate is an independent GPU job. Check the reported count before submitting,
+# and set CFI_ARRAY_LIMIT to bound concurrency.
+sweep:
+  kernel: [matern, squared_exponential, bandlimited_white]
+  tau_density: [0.020, 0.030, 0.040, 0.060]
+  correlation_length_angstrom: [0.40, 0.60, 0.90, 1.50]
+  alpha: [2.0, 2.5, 3.0]
+  latent_distribution: [gaussian]
+
+# 4 x 4 x 3 = 48 matern operators, 4 x 4 = 16 squared-exponential, 4 band-limited white:
+# 68 from the sweep, plus the one hand-written multiscale candidate below = 69. Raised
+# from the default of 64 deliberately; at 6 h per GPU job this is a large commitment.
+max_candidates: 69
+
+# Hand-written candidates may accompany a sweep; multiscale mixtures can only be given
+# this way, since they are defined by a component list rather than a scalar axis.
+candidates:
+  - name: multiscale_reference
+    prior:
+      kernel: multiscale_matern
+      tau_density: 0.045
+      latent_distribution: gaussian
+      components:
+        - {correlation_length_angstrom: 0.50, alpha: 2.0, weight: 0.50}
+        - {correlation_length_angstrom: 1.20, alpha: 2.5, weight: 0.35}
+        - {correlation_length_angstrom: 3.00, alpha: 3.0, weight: 0.15}
