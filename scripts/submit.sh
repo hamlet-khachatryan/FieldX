@@ -103,6 +103,9 @@ j_select=$(submit   52_select_prior.sbatch       --export="$SELECT_ENV"  --depen
 j_scalewk=$(submit  55_scaling_work.sbatch       --export="$FINAL_ENV"   --dependency=afterok:"$j_select")
 j_final=$(submit    60_final_fit.sbatch          --export="$FINAL_ENV"   --dependency=afterok:"$j_scalewk")
 j_info=$(submit     70_information.sbatch        --export="$FINAL_ENV"   --dependency=afterok:"$j_final")
+# Read-only analysis, parallel to the information spectrum. A leaf: the freeze does not
+# depend on it, so a decomposition failure cannot block the model lock.
+j_decompose=$(submit 72_decompose.sbatch         --export="$FINAL_ENV"   --dependency=afterok:"$j_final")
 # The freeze records the fit and the information spectrum, so it waits for both.
 j_freeze=$(submit   75_freeze_model.sbatch       --export="$FINAL_ENV"   --dependency=afterok:"$j_final":"$j_info")
 
@@ -124,6 +127,7 @@ Submitted FieldX v3 pipeline for $CONFIG
   55 scaling (work)       $j_scalewk
   60 final fit            $j_final
   70 information          $j_info
+  72 decomposition        $j_decompose
   75 freeze model         $j_freeze
 
 Monitor with:

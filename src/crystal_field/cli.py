@@ -45,6 +45,10 @@ NO_FREE_SET_OPTION = typer.Option(
     help="Hold nothing out: split.strategy=none, target R_work only. R_free is then undefined "
     "and the primary criterion cannot be evaluated.",
 )
+DECOMPOSE_BASIS_OPTION = typer.Option(
+    None, "--basis", help="Override decomposition.basis: coordinates, coordinates_b, full or residue_rigid."
+)
+DECOMPOSE_TRIALS_OPTION = typer.Option(None, "--n-trials", help="Override decomposition.n_capacity_trials.")
 
 
 def _cfg(path):
@@ -262,6 +266,20 @@ def export_maps_cmd(config: Path, sigma_a_from: str = SIGMA_A_OPTION, n_bins: in
     from crystal_field.maps import export_maps
 
     print(json.dumps(export_maps(cfg, sigma_a_from=sigma_a_from, n_bins=n_bins), indent=2))
+
+
+@app.command("decompose")
+def decompose_cmd(
+    config: Path,
+    basis: str | None = DECOMPOSE_BASIS_OPTION,
+    trials: int | None = DECOMPOSE_TRIALS_OPTION,
+):
+    """Decompose the inferred correction onto the atomic tangent space (read-only)."""
+    cfg = _cfg(config)
+    _configure(cfg)
+    from crystal_field.analysis.decomposition import run_decomposition
+
+    print(json.dumps(run_decomposition(cfg, basis=basis, n_trials=trials), indent=2))
 
 
 @app.command("expand-priors")

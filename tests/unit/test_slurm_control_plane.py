@@ -45,6 +45,7 @@ def test_the_expected_jobs_exist():
         "55_scaling_work",
         "60_final_fit",
         "70_information",
+        "72_decompose",
         "75_freeze_model",
         "80_evaluate_free",
     }
@@ -257,6 +258,24 @@ def test_dependency_chain_is_complete_and_ordered():
         assert dependency in text, dependency
     # The freeze waits for both the final fit and the information spectrum.
     assert '--dependency=afterok:"$j_final":"$j_info"' in text
+
+
+def test_the_decomposition_stage_is_a_leaf_and_does_not_gate_the_freeze():
+    """Spec section 7.1: the model lock and the existing chain must not change."""
+    lines = (ROOT / "scripts/submit.sh").read_text().splitlines()
+
+    # Assert against the 72 line itself: `--dependency=afterok:"$j_final"` also appears
+    # on the 70 line and is a prefix of the 75 line, so a whole-file `in` check passes
+    # without 72 existing at all.
+    decompose_line = next(line for line in lines if "72_decompose.sbatch" in line)
+    assert '--dependency=afterok:"$j_final"' in decompose_line, decompose_line
+    # A leaf hangs off the final fit ALONE, so $j_final is its only job reference.
+    assert decompose_line.count("$j_") == 1, decompose_line
+
+    # The freeze still waits only on the final fit and the information spectrum.
+    freeze_line = next(line for line in lines if "75_freeze_model.sbatch" in line)
+    assert '--dependency=afterok:"$j_final":"$j_info"' in freeze_line, freeze_line
+    assert "j_decompose" not in freeze_line, "the freeze must not depend on the decomposition"
 
 
 def test_submit_exports_only_the_minimum_runtime_metadata():

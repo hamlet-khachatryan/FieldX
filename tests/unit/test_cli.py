@@ -5,6 +5,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+import crystal_field.analysis.decomposition as decomposition_module
 from crystal_field.cli import app
 
 runner = CliRunner()
@@ -58,6 +59,29 @@ def test_evaluate_free_refuses_without_a_model_lock(tiny_dataset):
     assert isinstance(result.exception, (RuntimeError, SystemExit))
 
 
-@pytest.mark.parametrize("command", ["prepare", "make-rho0", "fit-map"])
+@pytest.mark.parametrize("command", ["prepare", "make-rho0", "fit-map", "decompose"])
 def test_pipeline_commands_reject_a_missing_config(command, tmp_path):
     assert runner.invoke(app, [command, str(tmp_path / "absent.yaml")]).exit_code != 0
+
+
+def test_decompose_is_listed_in_help():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "decompose" in result.output
+
+
+def test_decompose_invokes_the_analysis_with_the_requested_options(tiny_dataset, monkeypatch):
+    seen = {}
+
+    def fake(cfg, basis=None, n_trials=None):
+        seen["basis"] = basis
+        seen["n_trials"] = n_trials
+        return {"targets": {}}
+
+    # decompose_cmd imports run_decomposition inside its body (the codebase convention
+    # for every analysis-invoking command), so the name to patch is where it is looked
+    # up at call time -- the source module -- not an attribute of the cli module itself.
+    monkeypatch.setattr(decomposition_module, "run_decomposition", fake)
+    result = runner.invoke(app, ["decompose", str(tiny_dataset["config_path"]), "--basis", "full", "--n-trials", "3"])
+    assert result.exit_code == 0, result.output
+    assert seen == {"basis": "full", "n_trials": 3}
