@@ -192,12 +192,13 @@ def test_rigid_translation_matches_the_sum_of_atom_derivatives(model):
 
 
 def test_rigid_rotation_weights_sum_to_zero_net_translation(model):
-    """A rotation about the group centroid must not translate the group.
+    """The rotation-weight identity sum_i (axis x (r_i - centroid)) == 0 holds for any centroid.
 
-    Recomputes the displacement weights `_rigid_column` uses (axis x (r_i - centroid)) and
-    asserts they sum to the zero vector across the group's atoms -- pinning both the
-    centroid placement and the cross-product operand order. This is a property of the
-    weights themselves, not of the resulting density column.
+    This is a mathematical identity of the mean, true for `cross(axis, d)` and equally for
+    `cross(d, axis)` -- it does NOT pin the cross-product operand order (a bug there would
+    still pass). It is kept only as a cheap, independent check that the centroid used here
+    is in fact the mean position; the operand order and overall rotation math are covered
+    separately by `test_rigid_rotation_column_matches_the_explicit_cross_product`.
     """
     # ALA 1 is the first (multi-atom, 5-atom) residue_rigid group.
     group_atoms = [atom for _, atom in selected_atoms(model[0])][:5]
@@ -210,6 +211,37 @@ def test_rigid_rotation_weights_sum_to_zero_net_translation(model):
             position = np.array([atom.pos.x, atom.pos.y, atom.pos.z])
             total += np.cross(axis, position - centroid)
         np.testing.assert_allclose(total, np.zeros(3), atol=1e-10)
+
+
+def test_rigid_rotation_column_matches_the_explicit_cross_product(model):
+    """The stored r_z column must match the production `build_tangent_basis` output, checked
+    against an expected value written out WITHOUT `np.cross` -- so the test cannot inherit
+    a swapped-operand bug from the code it is meant to catch.
+
+    For rotation about z, `cross(z_hat, d)` where `d = r_i - centroid` is `(-d_y, d_x, 0)`
+    by definition of the cross product with a unit z axis. Writing that out literally means
+    a reversed operand order in `_rigid_column` (giving `(d_y, -d_x, 0)`, the exact negation)
+    would make this expected value diverge from the stored column and the test would fail.
+    """
+    basis = _basis(model, "residue_rigid")
+    # ALA 1 is the first (multi-atom, 5-atom) residue_rigid group -- group index 0.
+    group_atoms = [atom for _, atom in selected_atoms(model[0])][:5]
+    centroid = np.mean([[atom.pos.x, atom.pos.y, atom.pos.z] for atom in group_atoms], axis=0)
+
+    label_index = basis.labels.index((0, "r_z"))
+    stored = np.asarray(basis.matrix[:, label_index].todense()).ravel().reshape(SHAPE)
+
+    expected = np.zeros(SHAPE, dtype=np.float64)
+    for atom in group_atoms:
+        d_x = atom.pos.x - centroid[0]
+        d_y = atom.pos.y - centroid[1]
+        # cross(z_hat, d) = (-d_y, d_x, 0): written out literally, not via np.cross.
+        weight_x, weight_y = -d_y, d_x
+        if weight_x != 0.0:
+            expected += weight_x * tangent_column(atom, "x", model.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
+        if weight_y != 0.0:
+            expected += weight_y * tangent_column(atom, "y", model.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
+    np.testing.assert_allclose(stored, expected, atol=1e-10)
 
 
 def test_an_unknown_basis_is_rejected(model):
