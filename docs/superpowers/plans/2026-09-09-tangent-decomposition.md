@@ -1533,15 +1533,44 @@ git commit -m "feat(decomposition): orchestration, artifacts and map cross-refer
 
 Append to `tests/unit/test_cli.py`:
 
+`tests/unit/test_cli.py` already has a parametrized missing-config test — extend it rather than
+adding a duplicate standalone function:
+
 ```python
-def test_decompose_rejects_a_missing_config(tmp_path):
-    assert runner.invoke(app, ["decompose", str(tmp_path / "absent.yaml")]).exit_code != 0
+# in test_pipeline_commands_reject_a_missing_config, add to the parametrize list:
+@pytest.mark.parametrize("command", ["prepare", "make-rho0", "fit-map", "decompose"])
+```
 
+Then append:
 
+```python
 def test_decompose_is_listed_in_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "decompose" in result.output
+```
+
+Those two establish that the command EXISTS and validates its path, but neither proves it actually
+runs — a command can be registered, appear in help, reject a bad path and still be wired to nothing.
+Add a positive control that the command reaches the analysis entry point and forwards its options.
+Bind it to whatever name `cli.py` ends up using for `run_decomposition` (see Step 3) and use
+`monkeypatch` in the style of the existing tests in this file:
+
+```python
+def test_decompose_invokes_the_analysis_with_the_requested_options(tiny_dataset, monkeypatch):
+    seen = {}
+
+    def fake(cfg, basis=None, n_trials=None):
+        seen["basis"] = basis
+        seen["n_trials"] = n_trials
+        return {"targets": {}}
+
+    monkeypatch.setattr(cli, "run_decomposition", fake)
+    result = runner.invoke(
+        app, ["decompose", str(tiny_dataset["config_path"]), "--basis", "full", "--n-trials", "3"]
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == {"basis": "full", "n_trials": 3}
 ```
 
 In `tests/unit/test_slurm_control_plane.py`, update the two pinned sets:
