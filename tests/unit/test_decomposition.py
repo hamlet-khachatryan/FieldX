@@ -1,5 +1,7 @@
 """Decomposition of the inferred correction onto the atomic tangent space."""
 
+import json
+
 import gemmi
 import numpy as np
 import pytest
@@ -8,6 +10,7 @@ from conftest import write_tiny_model
 from crystal_field.analysis.decomposition import (
     capacity_control,
     decompose_target,
+    run_decomposition,
     solve_normal_equations,
     split_symmetric,
     symmetrize_grid,
@@ -235,3 +238,109 @@ def test_capacity_trials_are_seeded_and_reproducible(tiny_basis):
     assert first["n_trials"] == 3
     assert 0.0 <= first["mean"] <= 1.0
     assert first["sd"] >= 0.0
+
+
+@pytest.fixture
+def fitted(prepared_dataset):
+    from crystal_field.crystallography.scaling import fit_baseline_scaling
+    from crystal_field.inference.optimize import run_map_fit
+    from crystal_field.inference.problem import build_functions
+    from crystal_field.inference.runtime import load_problem_arrays
+
+    cfg = prepared_dataset["cfg"]
+    cfg = cfg.model_copy(
+        update={
+            "optimizer": cfg.optimizer.model_copy(update={"fit_scope": "work", "max_iterations": 10}),
+            "decomposition": cfg.decomposition.model_copy(update={"n_capacity_trials": 2}),
+        }
+    )
+    fit_baseline_scaling(cfg)
+    arrays = load_problem_arrays(cfg)
+    _, density, _, _, objective, metrics, _ = build_functions(arrays, cfg)
+    run_map_fit(cfg, arrays, objective, metrics, density)
+    prepared_dataset["cfg"] = cfg
+    return prepared_dataset
+
+
+def test_all_artifacts_are_written(fitted):
+    report = run_decomposition(fitted["cfg"])
+    directory = fitted["cfg"].run.output_dir / "decomposition"
+    for name in ("decomposition.json", "explained.ccp4", "unexplained.ccp4"):
+        assert (directory / name).is_file(), name
+    assert json.loads((directory / "decomposition.json").read_text()) == report
+
+
+def test_the_report_carries_both_targets_and_the_control(fitted):
+    report = run_decomposition(fitted["cfg"])
+    assert set(report["targets"]) == {"full_correction", "data_supported"}
+    for target in report["targets"].values():
+        assert 0.0 <= target["explained_fraction"] <= 1.0
+    control = report["capacity_control"]
+    assert control["n_trials"] == 2
+    assert 0.0 <= control["mean"] <= 1.0
+    assert report["basis"]["name"] == "coordinates"
+    assert report["basis"]["rank"] > 0
+    assert "antisymmetric_fraction" in report
+
+
+def test_explained_and_unexplained_reconstruct_the_symmetrized_correction(fitted):
+    """Per spec section 3, the target is symmetrize(u), not u."""
+    report = run_decomposition(fitted["cfg"])
+    directory = fitted["cfg"].run.output_dir / "decomposition"
+    explained = np.array(gemmi.read_ccp4_map(str(directory / "explained.ccp4")).grid, copy=True)
+    unexplained = np.array(gemmi.read_ccp4_map(str(directory / "unexplained.ccp4")).grid, copy=True)
+    assert explained.shape == unexplained.shape
+    assert np.all(np.isfinite(explained)) and np.all(np.isfinite(unexplained))
+    assert report["targets"]["full_correction"]["target_norm"] > 0
+
+
+def test_a_missing_fit_is_reported(prepared_dataset):
+    with pytest.raises(FileNotFoundError, match="fieldrefine fit-map"):
+        run_decomposition(prepared_dataset["cfg"])
+
+
+def test_the_free_set_does_not_influence_any_reported_number(fitted):
+    """Same discipline as the rest of the pipeline: mutate free, nothing may move."""
+    cfg = fitted["cfg"]
+    baseline = run_decomposition(cfg)
+
+    path = cfg.run.data_dir / "reflections.npz"
+    stored = dict(np.load(path))
+    free = stored["split"] == 2
+    assert free.any()
+    stored["observation"][free] *= 1000.0
+    np.savez_compressed(path, **stored)
+
+    mutated = run_decomposition(cfg)
+    for name in ("full_correction", "data_supported"):
+        assert mutated["targets"][name]["explained_fraction"] == pytest.approx(
+            baseline["targets"][name]["explained_fraction"]
+        )
+
+
+def test_the_basis_can_be_overridden(fitted):
+    report = run_decomposition(fitted["cfg"], basis="full")
+    assert report["basis"]["name"] == "full"
+    assert report["basis"]["n_columns"] > 0
+
+
+def test_the_span_property_v3_is_the_case_phi_equals_zero(fitted):
+    """Spec section 9.4, and the invariant increment 2 must preserve.
+
+    docs/V4_DESIGN.md section 2 states that v3 is the special case Phi = 0. With the
+    basis disabled nothing may be claimed as explained. Trivial here, but it is the
+    property joint refinement has to keep, so it is pinned from the start.
+    """
+    cfg = fitted["cfg"]
+    disabled = cfg.model_copy(update={"decomposition": cfg.decomposition.model_copy(update={"enabled": False})})
+    report = run_decomposition(disabled)
+    assert report["enabled"] is False
+    assert report["targets"]["full_correction"]["explained_fraction"] == 0.0
+    assert report["basis"]["n_columns"] == 0
+
+
+def test_a_disabled_decomposition_writes_nothing(fitted):
+    cfg = fitted["cfg"]
+    disabled = cfg.model_copy(update={"decomposition": cfg.decomposition.model_copy(update={"enabled": False})})
+    run_decomposition(disabled)
+    assert not (disabled.run.output_dir / "decomposition" / "decomposition.json").exists()

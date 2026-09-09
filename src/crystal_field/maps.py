@@ -252,6 +252,11 @@ def export_maps(cfg, sigma_a_from: str = "work", n_bins: int = 20) -> dict:
             "mFoDFc_field.ccp4": "sigma-A weighted difference map with FieldX phases",
             "mFoDFc_atomic.ccp4": "sigma-A weighted difference map with atomic-model phases",
         },
+        "related": {
+            "decomposition/explained.ccp4": "written by `fieldrefine decompose`: the part of the "
+            "correction the atomic tangent space explains",
+            "decomposition/unexplained.ccp4": "written by `fieldrefine decompose`: the part it does not",
+        },
         "statistics": written,
         "note": (
             "Compare 2FoFc_field against 2FoFc_atomic, not against refined.ccp4: the "
