@@ -11,7 +11,13 @@ import numpy as np
 import pytest
 from conftest import write_tiny_model
 
-from crystal_field.analysis.tangent import PARAMETER_STEPS, single_atom_model, tangent_column
+from crystal_field.analysis.tangent import (
+    PARAMETER_STEPS,
+    build_tangent_basis,
+    selected_atoms,
+    single_atom_model,
+    tangent_column,
+)
 from crystal_field.crystallography.density import model_density_on_grid
 
 SHAPE = (24, 30, 36)
@@ -95,3 +101,88 @@ def test_an_unknown_parameter_is_rejected(model):
 def test_parameter_steps_are_declared_for_every_kind():
     assert set(PARAMETER_STEPS) == {"x", "y", "z", "b_iso", "occupancy"}
     assert all(step > 0 for step in PARAMETER_STEPS.values())
+
+
+def _basis(model, name, spacegroup="P 1"):
+    return build_tangent_basis(model[0], model.cell, gemmi.SpaceGroup(spacegroup), SHAPE, D_MIN, CUTOFF, basis=name)
+
+
+def test_selected_atoms_excludes_hydrogens_and_zero_occupancy(model):
+    atoms = selected_atoms(model[0])
+    assert len(atoms) == 10
+    assert all(not atom.element.is_hydrogen for _, atom in atoms)
+    assert all(atom.occ > 0 for _, atom in atoms)
+
+
+@pytest.mark.parametrize(("name", "per_atom"), [("coordinates", 3), ("coordinates_b", 4), ("full", 5)])
+def test_column_count_follows_the_basis(model, name, per_atom):
+    basis = _basis(model, name)
+    assert basis.n_columns == 10 * per_atom
+    assert basis.matrix.shape == (int(np.prod(SHAPE)), basis.n_columns)
+    assert len(basis.labels) == basis.n_columns
+    assert basis.basis == name
+
+
+def test_labels_identify_atom_and_parameter(model):
+    basis = _basis(model, "coordinates")
+    kinds = {kind for _, kind in basis.labels}
+    assert kinds == {"x", "y", "z"}
+    assert {index for index, _ in basis.labels} == set(range(10))
+
+
+def test_the_matrix_is_sparse(model):
+    basis = _basis(model, "coordinates")
+    density = basis.matrix.nnz / (basis.matrix.shape[0] * basis.matrix.shape[1])
+    assert density < 0.5, f"columns should be local, got {density:.2%} filled"
+
+
+def test_columns_match_tangent_column_exactly(model):
+    """Assembly must not alter what Task 2 produces."""
+    basis = _basis(model, "coordinates")
+    index, kind = basis.labels[4]
+    atom = selected_atoms(model[0])[index][1]
+    expected = tangent_column(atom, kind, model.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
+    stored = np.asarray(basis.matrix[:, 4].todense()).ravel().reshape(SHAPE)
+    np.testing.assert_allclose(stored, expected, atol=1e-10)
+
+
+def test_norm_capture_is_reported(model):
+    """The sparsity guard: stored columns must retain essentially all their norm."""
+    basis = _basis(model, "coordinates")
+    assert basis.min_norm_fraction > 0.999
+
+
+def test_truncation_below_tolerance_is_refused(model):
+    with pytest.raises(ValueError, match="box_radius_angstrom"):
+        build_tangent_basis(
+            model[0],
+            model.cell,
+            gemmi.SpaceGroup("P 1"),
+            SHAPE,
+            D_MIN,
+            CUTOFF,
+            basis="coordinates",
+            truncate_radius=0.05,
+        )
+
+
+def test_residue_rigid_gives_six_columns_per_multi_atom_group(model):
+    """Single-atom groups have no meaningful rotation, so they contribute translation only."""
+    basis = _basis(model, "residue_rigid")
+    kinds = [kind for _, kind in basis.labels]
+    assert set(kinds) <= {"t_x", "t_y", "t_z", "r_x", "r_y", "r_z"}
+    # ALA(5 atoms) + GLY(4) + MET(1): two multi-atom groups x 6, one single-atom x 3.
+    assert basis.n_columns == 2 * 6 + 1 * 3
+
+
+def test_an_unknown_basis_is_rejected(model):
+    with pytest.raises(ValueError, match="Unknown basis"):
+        _basis(model, "everything")
+
+
+def test_a_model_with_no_usable_atoms_is_rejected(tmp_path):
+    empty = gemmi.Structure()
+    empty.cell = gemmi.UnitCell(20, 24, 28, 90, 90, 90)
+    empty.add_model(gemmi.Model("1"))
+    with pytest.raises(ValueError, match="No atoms"):
+        build_tangent_basis(empty[0], empty.cell, gemmi.SpaceGroup("P 1"), SHAPE, D_MIN, CUTOFF)
