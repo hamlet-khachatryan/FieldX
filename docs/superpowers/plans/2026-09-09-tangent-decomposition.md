@@ -1558,12 +1558,19 @@ Append to `tests/unit/test_slurm_control_plane.py`:
 ```python
 def test_the_decomposition_stage_is_a_leaf_and_does_not_gate_the_freeze():
     """Spec section 7.1: the model lock and the existing chain must not change."""
-    text = (ROOT / "scripts/submit.sh").read_text()
-    assert "72_decompose.sbatch" in text
-    assert '--dependency=afterok:"$j_final"' in text
+    lines = (ROOT / "scripts/submit.sh").read_text().splitlines()
+
+    # Assert against the 72 line itself: `--dependency=afterok:"$j_final"` also appears
+    # on the 70 line and is a prefix of the 75 line, so a whole-file `in` check passes
+    # without 72 existing at all.
+    decompose_line = next(line for line in lines if "72_decompose.sbatch" in line)
+    assert '--dependency=afterok:"$j_final"' in decompose_line, decompose_line
+    # A leaf hangs off the final fit ALONE, so $j_final is its only job reference.
+    assert decompose_line.count("$j_") == 1, decompose_line
+
     # The freeze still waits only on the final fit and the information spectrum.
-    assert '--dependency=afterok:"$j_final":"$j_info"' in text
-    freeze_line = next(line for line in text.splitlines() if "75_freeze_model.sbatch" in line)
+    freeze_line = next(line for line in lines if "75_freeze_model.sbatch" in line)
+    assert '--dependency=afterok:"$j_final":"$j_info"' in freeze_line, freeze_line
     assert "j_decompose" not in freeze_line, "the freeze must not depend on the decomposition"
 ```
 
