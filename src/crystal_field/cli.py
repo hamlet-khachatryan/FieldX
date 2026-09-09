@@ -272,14 +272,14 @@ def export_maps_cmd(config: Path, sigma_a_from: str = SIGMA_A_OPTION, n_bins: in
 def decompose_cmd(
     config: Path,
     basis: str | None = DECOMPOSE_BASIS_OPTION,
-    trials: int | None = DECOMPOSE_TRIALS_OPTION,
+    n_trials: int | None = DECOMPOSE_TRIALS_OPTION,
 ):
     """Decompose the inferred correction onto the atomic tangent space (read-only)."""
     cfg = _cfg(config)
     _configure(cfg)
     from crystal_field.analysis.decomposition import run_decomposition
 
-    print(json.dumps(run_decomposition(cfg, basis=basis, n_trials=trials), indent=2))
+    print(json.dumps(run_decomposition(cfg, basis=basis, n_trials=n_trials), indent=2))
 
 
 @app.command("expand-priors")
