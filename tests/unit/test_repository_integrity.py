@@ -153,3 +153,40 @@ def test_nothing_is_exported_without_a_workspace(tmp_path):
     assert env["FIELDX_WORKSPACE"] == ""
     for var in WORKSPACE_VARS:
         assert env[var] == "", f"{var} was set without a workspace: {env[var]}"
+
+
+def test_sourcing_common_sh_with_arguments_does_not_hijack_the_workspace(tmp_path):
+    """A sourced script inherits the CALLER's positional parameters.
+
+    `scripts/submit.sh CONFIG.yaml` sources common.sh, so without an explicit "" the
+    config path arrives as $1 in workspace-env.sh and is read as a workspace directory --
+    which failed with "FIELDX_WORKSPACE is not a usable directory: configs/.../default.yaml".
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    script = f"""
+set -- configs/1ubq/default.yaml
+export FIELDX_WORKSPACE='{workspace}'
+export SLURM_SUBMIT_DIR='{ROOT}'
+source '{ROOT}/slurm/common.sh' 2>/dev/null
+printf 'WORKSPACE=%s\\n' "$FIELDX_WORKSPACE"
+printf 'DATA=%s\\n' "$FIELDX_DATA_ROOT"
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, cwd=ROOT)
+    out = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    assert out.get("WORKSPACE") == str(workspace), proc.stdout + proc.stderr
+    assert out.get("DATA") == str(workspace / "data"), proc.stdout + proc.stderr
+
+
+def test_a_workspace_argument_that_is_a_file_is_refused(tmp_path):
+    """Rather than mkdir over it, or silently rooting the run inside a config file."""
+    a_file = tmp_path / "default.yaml"
+    a_file.write_text("run: {}\n")
+    proc = subprocess.run(
+        ["bash", "-c", f"source '{ROOT}/scripts/workspace-env.sh' '{a_file}'"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert proc.returncode != 0, "a file was accepted as a workspace"
+    assert "not a directory" in proc.stderr

@@ -61,7 +61,10 @@ export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$PROJECT_ROOT/.venv}"
 if [[ -n "${FIELDX_WORKSPACE:-}" && -f "$PROJECT_ROOT/scripts/workspace-env.sh" ]]; then
   FIELDX_WORKSPACE_QUIET=1
   # shellcheck source=../scripts/workspace-env.sh
-  source "$PROJECT_ROOT/scripts/workspace-env.sh"
+  # Explicit "" because a sourced script inherits the CALLER's positional parameters:
+  # submit.sh is invoked with a config path, and without this that path arrives as $1
+  # and is mistaken for the workspace.
+  source "$PROJECT_ROOT/scripts/workspace-env.sh" ""
   unset FIELDX_WORKSPACE_QUIET
 fi
 

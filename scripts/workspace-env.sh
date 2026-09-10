@@ -13,7 +13,16 @@
 #
 # Anything you set yourself wins: this only fills in what you have not already chosen.
 
+# Note for callers that SOURCE this file: a sourced script inherits the caller's
+# positional parameters, so pass an explicit "" if you mean "no argument" -- otherwise
+# the caller's own $1 is read as a workspace path.
 if [[ -n "${1:-}" ]]; then
+  if [[ -e "$1" && ! -d "$1" ]]; then
+    echo "FieldX: workspace argument is not a directory: $1" >&2
+    echo "        (if you sourced this from a script, pass an explicit \"\" so the" >&2
+    echo "         caller's positional parameters are not read as a workspace path)" >&2
+    return 1 2>/dev/null || exit 1
+  fi
   FIELDX_WORKSPACE="$1"
 fi
 
