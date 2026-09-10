@@ -56,25 +56,46 @@ fi
 # the real condition here, while the message can still name the fix.
 _fieldx_cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')"
 if [[ -n "$_fieldx_cc" && -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/ptxas" ]]; then
-  _fieldx_cc_int="${_fieldx_cc/./}"
-  _fieldx_cuda_major="$("$CUDA_HOME/bin/ptxas" --version 2>/dev/null | sed -n 's/.*release \([0-9]*\).*/\1/p' | head -1)"
-  if [[ "$_fieldx_cc_int" =~ ^[0-9]+$ && "$_fieldx_cuda_major" =~ ^[0-9]+$ ]] \
-     && (( _fieldx_cc_int < 75 && _fieldx_cuda_major >= 13 )); then
-    echo "FieldX: FATAL -- this GPU has compute capability $_fieldx_cc, which CUDA $_fieldx_cuda_major does not support." >&2
-    echo "        CUDA 13 removed Volta (7.0). No ptxas from a CUDA 13 toolkit can build for it," >&2
-    echo "        so XLA falls back to the driver and fails with a misleading 'ptxas too old'." >&2
-    echo "        fix: rebuild the environment against CUDA 12:" >&2
-    echo "             rm -rf .venv && uv sync --locked --extra cuda12 --group dev" >&2
-    echo "        or submit to a partition with compute capability 7.5 or newer." >&2
-    return 1 2>/dev/null || exit 1
+  _fieldx_cc_int="${_fieldx_cc/./}"          # 7.0 -> 70, 12.0 -> 120
+  _fieldx_ptxas_release="$("$CUDA_HOME/bin/ptxas" --version 2>/dev/null | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p' | head -1)"
+  _fieldx_cuda_major="${_fieldx_ptxas_release%%.*}"
+  _fieldx_cuda_minor="${_fieldx_ptxas_release##*.}"
+  if [[ "$_fieldx_cc_int" =~ ^[0-9]+$ && "$_fieldx_cuda_major" =~ ^[0-9]+$ ]]; then
+    # A toolkit supports a bounded RANGE of compute capabilities, and a GPU can fall off
+    # either end. CUDA 13 dropped Volta at the bottom; CUDA 12 before 12.8 cannot reach
+    # Blackwell at the top. Both surface as an opaque ptxas error, so name both here.
+    if (( _fieldx_cuda_major >= 13 )); then
+      _fieldx_min_cc=75; _fieldx_max_cc=120
+    elif (( _fieldx_cuda_major == 12 && _fieldx_cuda_minor >= 8 )); then
+      _fieldx_min_cc=50; _fieldx_max_cc=120
+    elif (( _fieldx_cuda_major == 12 )); then
+      _fieldx_min_cc=50; _fieldx_max_cc=90
+    else
+      _fieldx_min_cc=50; _fieldx_max_cc=86
+    fi
+
+    if (( _fieldx_cc_int < _fieldx_min_cc )); then
+      echo "FieldX: FATAL -- GPU compute capability $_fieldx_cc is BELOW what CUDA $_fieldx_ptxas_release supports." >&2
+      echo "        CUDA 13 removed Volta (7.0). XLA reports this as a misleading 'ptxas too old'." >&2
+      echo "        fix: rm -rf .venv && uv sync --locked --extra cuda12 --group dev" >&2
+      return 1 2>/dev/null || exit 1
+    fi
+    if (( _fieldx_cc_int > _fieldx_max_cc )); then
+      echo "FieldX: FATAL -- GPU compute capability $_fieldx_cc is ABOVE what CUDA $_fieldx_ptxas_release supports." >&2
+      echo "        Blackwell (12.0) needs CUDA 12.8+ or CUDA 13; this toolkit cannot target it." >&2
+      echo "        fix: rm -rf .venv && uv sync --locked --extra cuda13 --group dev" >&2
+      echo "        and make sure the loaded module is CUDA 13 (module avail cuda)." >&2
+      return 1 2>/dev/null || exit 1
+    fi
   fi
-  echo "FieldX: GPU compute capability $_fieldx_cc, CUDA toolkit major $_fieldx_cuda_major" >&2
+  echo "FieldX: GPU compute capability $_fieldx_cc, CUDA toolkit $_fieldx_ptxas_release" >&2
 fi
 
 # JAX resolves libcupti through LD_LIBRARY_PATH; some module files export CUDA_HOME only.
 for _dir in "${CUDA_HOME:-}/extras/CUPTI/lib64" "${CUDA_HOME:-}/lib64"; do
   [[ -d "$_dir" ]] && export LD_LIBRARY_PATH="$_dir:${LD_LIBRARY_PATH:-}"
 done
-unset _fieldx_cuda_root _tool _path _dir _fieldx_cc _fieldx_cc_int _fieldx_cuda_major
+unset _fieldx_cuda_root _tool _path _dir _fieldx_cc _fieldx_cc_int _fieldx_cuda_major \
+      _fieldx_cuda_minor _fieldx_ptxas_release _fieldx_min_cc _fieldx_max_cc
 
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true
