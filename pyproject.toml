@@ -38,7 +38,8 @@ dependencies = [
 # "ptxas too old" rather than "this GPU is unsupported".
 #
 #   compute capability 7.0        (V100)              -> cuda12
-#   compute capability 7.5+       (T4, A100, H100...) -> cuda13
+#   compute capability 7.5 - 9.0  (T4, A100, H100)    -> either
+#   compute capability 10.0+      (Blackwell)         -> cuda13
 #
 # Check with: nvidia-smi --query-gpu=name,compute_cap --format=csv
 cpu = ["jax>=0.7,<1", "optax>=0.2.5,<1"]

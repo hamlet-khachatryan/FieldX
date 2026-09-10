@@ -41,8 +41,17 @@ nvidia-smi --query-gpu=name,compute_cap --format=csv
 
 | compute capability | example GPU | extra |
 |---|---|---|
-| 7.0 | V100 | `cuda12` |
-| 7.5 and newer | T4, A100, H100 | `cuda13` |
+| 7.0 | V100 | `cuda12` (CUDA 13 dropped Volta) |
+| 7.5 - 9.0 | T4, A100, H100 | either |
+| 10.0 and newer | Blackwell (12.0) | `cuda13` (CUDA 12 before 12.8 cannot target it) |
+
+A toolkit supports a bounded *range*, and a GPU can fall off either end. Both ends surface
+as the same opaque ptxas error, so `slurm/dls/cuda.sh` checks both and names which way the
+mismatch went.
+
+**A single environment cannot serve GPUs at both ends.** With a mix of, say, V100 and
+Blackwell nodes, no one extra works for both: pin the GPU type at submission so every job
+lands on hardware the built environment can target.
 
 `slurm/dls/cuda.sh` refuses to continue on a mismatch and names the fix, and
 `scripts/cluster_preflight.sh` checks the installed plugin against the visible GPU. If
